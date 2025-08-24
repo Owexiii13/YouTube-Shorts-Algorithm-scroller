@@ -30,9 +30,19 @@ You can always override its decisions such as scrolling, liking, and disliking, 
 
 ---
 
+## Disclaimer
+This tool interacts with YouTube automatically.
+
+## Contributing
+Contributions are welcome! Feel free to submit a pull request or open a discussion to suggest features or improvements. 
+
+
+
+---
+
 **Note:** Do not reload the extension after using it because it may fail once it has created the `_pycache_` directory. If you accidentally reload it, you can move `shorts_ai_data.json` and the `_pycache_` folder to another folder, reload the extension, then place them back in.
 
-I do hope to somehow bring this to mobile, but it may be hard to do — I'm not sure how I'd attempt it and it won't be for a while. You can always open up requests if you'd like to help out with development.
+I do hope to somehow bring this to mobile, but it may be hard to do - I'm not sure how I'd attempt it and it won't be for a while.
 
 ---
 
