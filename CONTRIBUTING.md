@@ -6,7 +6,6 @@ If you want to contribute, this doc tells you how to do it.
 
 ## Quick TL;DR
 - Fork the repo  
-- Create a branch: `feat/short-desc` or `fix/short-desc`
 - Make changes and tests if you can  
 - Open a PR(Pull Request) with a clear description and steps to test 
 - Don’t commit secrets or files containing information such as `__pycache__` or `shorts_ai_data.json`
