@@ -1,5 +1,6 @@
-# YouTube-Shorts-Algorithm-scroller
-
+# YouTube-Shorts-Algorithm-Scroller
+Extenion, algorithm, learning, free to use, easy to setup
+---
 An algorithm that can learn from the YouTube Shorts that you watch to automatically scroll and like/dislike videos for you.
 
 **Note:** all files were generated using Manus AI.
