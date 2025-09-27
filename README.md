@@ -61,7 +61,7 @@ See `LICENSE.md` for the full legal text: https://creativecommons.org/licenses/b
 
 If you want permission for **commercial** use or to redistribute/modify, contact the repo owner.
 
-#Why is it under this license though?
+# Why is it under this license though?
 
 To ensure this AI-generated project isn't used commercially, it's licensed under CC BY-NC-ND 4.0.
 
