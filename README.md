@@ -3,7 +3,7 @@ Extenion, algorithm, learning, free to use, easy to setup
 ---
 An algorithm that can learn from the YouTube Shorts that you watch to automatically scroll and like/dislike videos for you.
 
-**Note:** all files were generated using Manus AI.
+**Note:** all code files were generated using Manus AI.
 
 This is a side project that became useful enough I thought I'd share it with everyone.
 
