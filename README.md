@@ -24,6 +24,17 @@ This was only tested on Windows 11; it may not work with all systems.
 7. Open the unzipped folder and double-click `start_app.py` — this will download any dependencies that haven't already been installed and will run the app.  
 8. Open https://www.youtube.com and navigate to the **Shorts** tab.  
 9. You should see, in the bottom-left, a mood dropdown and other information; on the middle-right you can click **"Trust"** to make sure it doesn't dislike videos from the creator of the video you're currently watching.
+10. Make sure every time you use it you start the backend part by starting `start_app.py`.
+
+# Commands: 
+
+Alt+T: Toggle control panel
+
+Alt+S: Force scroll to next video
+
+Alt+C: Force channel detection
+
+---
 
 It may take a bit before you start to see the algorithm scrolling and liking/disliking videos for you. I recommend about **3–5 hours** of scrolling before you start to see good results.
 
