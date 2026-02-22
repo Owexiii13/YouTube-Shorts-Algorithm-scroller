@@ -58,23 +58,20 @@ I do hope to somehow bring this to mobile, but it may be hard to do - I'm not su
 
 ---
 
-# License — CC BY-NC-ND 4.0
+# License — Apache 2.0
 
-This project is licensed under **Creative Commons Attribution-NonCommercial-NoDerivatives 4.0 International (CC BY-NC-ND 4.0)**.
+This project is licensed under **Apache 2.0**.
 
 What this means:
-- **Attribution required** — credit the author (link to this repo) when you use it.  
-- **Non-commercial** — you may **not** use this work for commercial purposes.  
-- **No derivatives** — you may **not** distribute modified versions of this work.  
-- You may **download and use** the project for personal, educational, or research purposes.
+- Commercial Use — You can use this software and any derivatives for commercial purposes.
+- Modification & Distribution — You can modify the code and distribute your own versions.
+- Attribution — You must give appropriate credit, provide a link to the license, and indicate if changes were made. 
+- Patent Grant — This license provides an express grant of patent rights from contributors to users.
 
-See `LICENSE.md` for the full legal text: https://creativecommons.org/licenses/by-nc-nd/4.0/
+See `LICENSE.md` for the full legal text: https://www.apache.org/licenses/LICENSE-2.0
 
 If you want permission for **commercial** use or to redistribute/modify, contact the repo owner.
 
-# Why is it under this license though?
-
-To ensure this AI-generated project isn't used commercially, it's licensed under CC BY-NC-ND 4.0.
 
 ---
 
