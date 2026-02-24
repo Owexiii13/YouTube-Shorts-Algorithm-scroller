@@ -1,16 +1,9 @@
 ---
 name: Data Contribution
-about: Contribute your obfuscated training data to help improve the Model for everyone.
-title: ''
+about: Contribute your watch data to train/improve the algorithm for everyone.
 labels: Data
-assignees: ''
-
 ---
 
-### Privacy & Data Verification
-- [x] I understand that my data is **OBFUSCATED** (mathematically scrambled).
-- [x] I understand that this file contains NO readable video titles, IDs, or history.
 ### Data Upload
-Please drag and drop your `shorts_ai_training_log_partX.json` files below. (May be more than one file)
+Please drag and drop your `DataForTrainingX.json` files below. (X could be any number, it depends on how many files it generated.)
 *(Found in the folder of the YouTube-Shorts-Algorithm-scroller).*
-**Note:** This data helps the AI learn "mathematical patterns" of user preferences without ever seeing your private history.
