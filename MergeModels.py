@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -315,6 +316,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Merge latest base model into UserModel.pt with compatibility checks.")
     parser.add_argument("--alpha", type=float, default=0.6, help="Merge ratio for UserModel weights (default: 0.6)")
     parser.add_argument("--root", type=str, default=".", help="Directory to scan for model/data files")
+    parser.add_argument(
+        "--no-pause",
+        action="store_true",
+        help="Do not pause for Enter before exit (useful for terminal automation).",
+    )
     args = parser.parse_args()
 
     if not (0.0 <= args.alpha <= 1.0):
@@ -389,5 +395,30 @@ def main() -> int:
     return 0
 
 
+def maybe_pause_before_exit(no_pause: bool) -> None:
+    """Keep the window open when script is launched by double-click.
+
+    By default, if no command-line arguments are provided, we pause before
+    exit so the user can read status/output in a GUI-launched console window.
+    """
+    if no_pause:
+        return
+
+    launched_without_args = len(sys.argv) == 1
+    if launched_without_args:
+        try:
+            input("\n[MergeModels] Press Enter to close...")
+        except EOFError:
+            pass
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        exit_code = main()
+    except Exception as exc:
+        print(f"[MergeModels] Fatal error: {exc}")
+        exit_code = 1
+
+    no_pause_flag = "--no-pause" in sys.argv
+    maybe_pause_before_exit(no_pause=no_pause_flag)
+    raise SystemExit(exit_code)
