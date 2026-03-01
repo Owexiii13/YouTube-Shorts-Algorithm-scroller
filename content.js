@@ -406,14 +406,10 @@ function detectCurrentVideo() {
       if (CONFIG.forceScrollAfterSeconds > 0) {
         STATE.forceScrollTimer = setTimeout(() => {
           if (!STATE.videoCompleted && 
-              !STATE.userIntentToStay && 
-              !STATE.userOverrideActive && 
               STATE.currentVideoId === videoId) {
             console.log(`[ShortsAI] Force scrolling after ${CONFIG.forceScrollAfterSeconds} seconds`);
             STATE.lastAutoScrollTrigger = 'force_timer';
             scrollToNextVideo();
-          } else if (STATE.userOverrideActive) {
-            console.log("[ShortsAI] Force scroll cancelled - user override active");
           }
         }, CONFIG.forceScrollAfterSeconds * 1000);
       }
@@ -503,9 +499,7 @@ function handleVideoCompletion(method) {
     
     // NEW: Only auto-scroll if user hasn't shown intent to stay
     if (STATE.autoScrollEnabled && 
-        CONFIG.autoScrollOnCompletion && 
-        !STATE.userIntentToStay && 
-        !STATE.userOverrideActive) {
+        CONFIG.autoScrollOnCompletion) {
       console.log("[ShortsAI] GUARANTEED AUTO-SCROLL: Video completed, scrolling to next");
       STATE.lastAutoScrollTrigger = `completion_${method}`;
       STATE.lastAutoScrolledVideoId = STATE.currentVideoId;
@@ -514,8 +508,6 @@ function handleVideoCompletion(method) {
       setTimeout(() => scrollToNextVideo(), 800);
       setTimeout(() => scrollToNextVideo(), 1500);
       setTimeout(() => scrollToNextVideo(), 2500);
-    } else if (STATE.userOverrideActive) {
-      console.log("[ShortsAI] Auto-scroll cancelled - user override active");
     }
   } catch (error) {
     console.error('[ShortsAI] Error in handleVideoCompletion:', error);
@@ -1292,10 +1284,7 @@ function dislikeCurrentVideo() {
 function checkAutoFeedback() {
   try {
     if (STATE.pendingAutoFeedback || 
-        STATE.userHasGivenFeedback || 
-        STATE.aiActionBlocked ||
-        STATE.userIntentToStay ||
-        STATE.userOverrideActive) {
+        STATE.userHasGivenFeedback) {
       return;
     }
 
