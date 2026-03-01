@@ -25,7 +25,7 @@ from .config import (
 )
 from .evaluate import append_metrics_history, compare_with_previous, evaluate_model
 from .features import DataValidationError, validate_entries
-from .train import save_model, train_medium_model
+from .trainer_core import save_model, train_medium_model
 from .vocab_builder import build_vocab, save_vocab
 
 

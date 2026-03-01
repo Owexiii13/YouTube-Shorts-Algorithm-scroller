@@ -15,3 +15,4 @@ UserModel_before_merge.pt
 shorts_ai_data.json
 __pycache__/
 *.pyc
+training/train.py

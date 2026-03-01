@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .train import MediumModel
+from .trainer_core import MediumModel
 
 
 def compress_model(model: MediumModel, keep_threshold: float = -12.0, ndigits: int = 5) -> MediumModel:
