@@ -29,7 +29,8 @@ const CONFIG = {
   autoFeedbackConfirmationTime: 30000, // 30 seconds to undo auto-feedback before AI learns from it
   longFormClickPreventionDelay: 300, // Prevent accidental clicks for 300ms after page load
   userIntentDetectionTime: 5000, // 5 seconds to detect user intent to stay on video
-  userIntentScrollBackThreshold: 2 // Number of scroll-backs to trigger intent detection
+  userIntentScrollBackThreshold: 2, // Number of scroll-backs to trigger intent detection
+  chunkStatusPollInterval: 15000
 };
 
 // State
@@ -101,7 +102,11 @@ let STATE = {
   userIntentDetected: false, // Whether we've detected user intent for current video
   lastVideoInHistory: [], // Track last few videos to detect returns
   scrollBackCount: 0, // Count of consecutive scroll-backs to same video
-  userOverrideActive: false // Whether user has overridden AI for current video
+  userOverrideActive: false, // Whether user has overridden AI for current video
+
+  chunkPromptElement: null,
+  currentPendingChunk: null,
+  promptedChunks: new Set()
 };
 
 console.log("[ShortsAI] Content script loading (User Intent Detection Version)...");
@@ -126,6 +131,7 @@ function initialize() {
   try {
     createStatusOverlay();
     createTrustButton();
+    createChunkPromptPopup();
     setupKeyboardShortcuts();
 
     // Smart long-form video click prevention
@@ -232,6 +238,8 @@ function initialize() {
     setInterval(updateWatchedPercent, CONFIG.watchedPercentUpdateInterval);
     
     fetchBufferSize();
+    pollChunkStatus();
+    setInterval(pollChunkStatus, CONFIG.chunkStatusPollInterval);
 
     console.log("[ShortsAI] Initialization complete. Monitoring DOM for changes.");
   } catch (error) {
@@ -1251,6 +1259,143 @@ function fetchBufferSize() {
     });
   } catch (error) {
     console.error('[ShortsAI] Error in fetchBufferSize:', error);
+  }
+}
+
+function createChunkPromptPopup() {
+  try {
+    if (STATE.chunkPromptElement) {
+      STATE.chunkPromptElement.remove();
+    }
+
+    STATE.chunkPromptElement = document.createElement('div');
+    STATE.chunkPromptElement.id = 'shorts-ai-chunk-prompt';
+    STATE.chunkPromptElement.style.cssText = `
+      position: fixed;
+      bottom: 20px;
+      left: 340px;
+      background: rgba(20, 20, 20, 0.95);
+      color: white;
+      padding: 10px;
+      border-radius: 8px;
+      font-family: Arial, sans-serif;
+      font-size: 12px;
+      z-index: 10001;
+      width: 280px;
+      border: 1px solid #444;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+      display: none;
+      pointer-events: auto;
+    `;
+
+    STATE.chunkPromptElement.innerHTML = `
+      <div style="font-weight: 700; margin-bottom: 6px;">Training data chunk ready</div>
+      <div id="chunk-prompt-file" style="margin-bottom: 6px; color: #8bc34a; word-break: break-word;"></div>
+      <div style="margin-bottom: 8px; color: #ccc;">Privacy notice: only your local completed training chunk filename is sent when you submit.</div>
+      <div style="display: flex; gap: 8px; justify-content: flex-end;">
+        <button id="chunk-dismiss-btn" style="border: 1px solid #666; background: #2b2b2b; color: #fff; border-radius: 4px; padding: 4px 8px; cursor: pointer;">Dismiss</button>
+        <button id="chunk-submit-btn" style="border: 1px solid #1976d2; background: #2196f3; color: #fff; border-radius: 4px; padding: 4px 8px; cursor: pointer;">Submit</button>
+      </div>
+    `;
+
+    document.body.appendChild(STATE.chunkPromptElement);
+
+    const dismissBtn = STATE.chunkPromptElement.querySelector('#chunk-dismiss-btn');
+    const submitBtn = STATE.chunkPromptElement.querySelector('#chunk-submit-btn');
+
+    dismissBtn.addEventListener('click', () => hideChunkPrompt());
+    submitBtn.addEventListener('click', () => submitChunkPrompt());
+
+    const storedPrompted = sessionStorage.getItem('shorts_ai_prompted_chunks');
+    if (storedPrompted) {
+      JSON.parse(storedPrompted).forEach((name) => STATE.promptedChunks.add(name));
+    }
+
+    console.log('[ShortsAI] Chunk prompt popup created');
+  } catch (error) {
+    console.error('[ShortsAI] Error creating chunk prompt popup:', error);
+  }
+}
+
+function savePromptedChunks() {
+  try {
+    sessionStorage.setItem('shorts_ai_prompted_chunks', JSON.stringify(Array.from(STATE.promptedChunks)));
+  } catch (error) {
+    console.error('[ShortsAI] Failed to persist prompted chunks:', error);
+  }
+}
+
+function showChunkPrompt(filename) {
+  if (!STATE.chunkPromptElement || !filename) return;
+
+  const fileLabel = STATE.chunkPromptElement.querySelector('#chunk-prompt-file');
+  fileLabel.textContent = filename;
+  STATE.currentPendingChunk = filename;
+  STATE.chunkPromptElement.style.display = 'block';
+}
+
+function hideChunkPrompt(markPrompted = true) {
+  if (!STATE.chunkPromptElement) return;
+  if (markPrompted && STATE.currentPendingChunk) {
+    STATE.promptedChunks.add(STATE.currentPendingChunk);
+    savePromptedChunks();
+  }
+  STATE.chunkPromptElement.style.display = 'none';
+}
+
+function pollChunkStatus() {
+  try {
+    fetch(`${CONFIG.apiBaseUrl}/chunk_status?session_id=browser_session`)
+    .then(response => response.json())
+    .then(data => {
+      if (!data || data.status !== 'success') return;
+
+      const nextChunk = data.next_chunk;
+      if (!nextChunk) return;
+
+      const alreadyPrompted = data.prompted_this_session || STATE.promptedChunks.has(nextChunk);
+      if (alreadyPrompted) return;
+
+      showChunkPrompt(nextChunk);
+    })
+    .catch(error => {
+      console.error('[ShortsAI] Error polling chunk status:', error);
+    });
+  } catch (error) {
+    console.error('[ShortsAI] Error in pollChunkStatus:', error);
+  }
+}
+
+function submitChunkPrompt() {
+  try {
+    if (!STATE.currentPendingChunk) return;
+
+    fetch(`${CONFIG.apiBaseUrl}/submit_chunk`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        filename: STATE.currentPendingChunk,
+        session_id: 'browser_session'
+      })
+    })
+    .then(async (response) => {
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload?.detail?.message || payload?.message || 'Chunk submit failed');
+      }
+      return payload;
+    })
+    .then(() => {
+      hideChunkPrompt(true);
+      pollChunkStatus();
+    })
+    .catch(error => {
+      console.error('[ShortsAI] Error submitting chunk:', error);
+    });
+  } catch (error) {
+    console.error('[ShortsAI] Error in submitChunkPrompt:', error);
   }
 }
 
