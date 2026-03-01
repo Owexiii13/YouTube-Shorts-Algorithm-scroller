@@ -1,0 +1,17 @@
+training/
+!training/
+training/**
+!training/*.py
+!training/__init__.py
+!training/data/
+!training/data/.gitkeep
+!training/models/
+!training/models/.gitkeep
+!training/reports/
+!training/reports/.gitkeep
+DataForTraining*.json
+UserModel.pt
+UserModel_before_merge.pt
+shorts_ai_data.json
+__pycache__/
+*.pyc
