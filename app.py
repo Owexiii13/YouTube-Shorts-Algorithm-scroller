@@ -1,9 +1,10 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
+from typing import List
 import uvicorn
 from model import ShortsAIModel
+from data_logger import DataLogger
 
 app = FastAPI(title="YouTube Shorts AI Personalizer", version="1.0.0")
 
@@ -18,6 +19,10 @@ app.add_middleware(
 
 # Initialize the model
 model = ShortsAIModel()
+
+# Initialize training data logger
+data_logger = DataLogger()
+
 
 class EventRequest(BaseModel):
     video_id: str
@@ -35,6 +40,20 @@ class PredictionRequest(BaseModel):
     title: str = ""
     description: str = ""
     captions: str = ""
+
+class TrainingLogRequest(BaseModel):
+    title: str
+    description: str
+    channel: str
+    tags: List[str]
+    category: str
+    subtitles_snippet: str
+    duration_seconds: float
+    watch_percentage: float
+    user_action: str
+    algorithm_action: str
+    day_of_week: str
+    time_of_day_bucket: str
 
 @app.get("/")
 async def root():
@@ -107,6 +126,25 @@ async def suggest_mood():
         return {"suggested_mood": suggestion}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/log_training")
+async def log_training_data(request: TrainingLogRequest):
+    try:
+        result = data_logger.append_entry(request.model_dump())
+        return {"status": "success", **result}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/log_status")
+async def get_log_status():
+    try:
+        return data_logger.get_status()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 if __name__ == "__main__":
     print("Starting YouTube Shorts AI Personalizer backend...")
