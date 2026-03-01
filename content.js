@@ -29,13 +29,15 @@ const CONFIG = {
   autoFeedbackConfirmationTime: 30000, // 30 seconds to undo auto-feedback before AI learns from it
   longFormClickPreventionDelay: 300, // Prevent accidental clicks for 300ms after page load
   userIntentDetectionTime: 5000, // 5 seconds to detect user intent to stay on video
-  userIntentScrollBackThreshold: 2 // Number of scroll-backs to trigger intent detection
+  userIntentScrollBackThreshold: 2, // Number of scroll-backs to trigger intent detection
+  chunkStatusPollInterval: 15000
 };
 
 // State
 let STATE = {
   currentVideoId: null,
   currentChannelId: null,
+  currentChannelName: null,
   currentTitle: null,
   currentDescription: null,
   currentCaptions: null,
@@ -101,7 +103,12 @@ let STATE = {
   userIntentDetected: false, // Whether we've detected user intent for current video
   lastVideoInHistory: [], // Track last few videos to detect returns
   scrollBackCount: 0, // Count of consecutive scroll-backs to same video
-  userOverrideActive: false // Whether user has overridden AI for current video
+  userOverrideActive: false, // Whether user has overridden AI for current video
+  currentUserAction: "neutral",
+  lastAlgorithmAction: "none",
+  loggedVideoIds: new Set(),
+  dataSubmitPopup: null,
+  pendingChunkFile: null
 };
 
 console.log("[ShortsAI] Content script loading (User Intent Detection Version)...");
@@ -175,7 +182,9 @@ function initialize() {
           
           if (isNowLiked) {
             console.log("[ShortsAI] Video manually liked by user - POSITIVE FEEDBACK");
+            STATE.currentUserAction = "liked";
             sendEvent("user_like", 12);
+            logCurrentVideoForTraining("manual_like");
           } else {
             console.log("[ShortsAI] User removed like");
             sendEvent("user_unlike", 0);
@@ -206,7 +215,9 @@ function initialize() {
           
           if (isNowDisliked) {
             console.log("[ShortsAI] Video manually disliked by user - NEGATIVE FEEDBACK");
+            STATE.currentUserAction = "disliked";
             sendEvent("user_dislike", -12);
+            logCurrentVideoForTraining("manual_dislike");
           } else {
             console.log("[ShortsAI] User removed dislike");
             sendEvent("user_undislike", 0);
@@ -232,6 +243,8 @@ function initialize() {
     setInterval(updateWatchedPercent, CONFIG.watchedPercentUpdateInterval);
     
     fetchBufferSize();
+    createDataSubmitPopup();
+    setInterval(checkChunkStatus, CONFIG.chunkStatusPollInterval);
 
     console.log("[ShortsAI] Initialization complete. Monitoring DOM for changes.");
   } catch (error) {
@@ -385,6 +398,10 @@ function detectCurrentVideo() {
     
     if (videoId !== STATE.currentVideoId) {
       console.log(`[ShortsAI] Video changed: ${videoId}`);
+
+      if (STATE.currentVideoId) {
+        logCurrentVideoForTraining("video_change");
+      }
       
       // NEW: Add previous video to history
       if (STATE.currentVideoId) {
@@ -418,6 +435,7 @@ function detectCurrentVideo() {
       // Reset state for new video
       STATE.currentVideoId = videoId;
       STATE.currentChannelId = null;
+      STATE.currentChannelName = null;
       STATE.currentTitle = null;
       STATE.currentDescription = null;
       STATE.currentCaptions = null;
@@ -451,6 +469,8 @@ function detectCurrentVideo() {
       STATE.userIntentDetected = false;
       STATE.scrollBackCount = 0;
       STATE.userOverrideActive = false;
+      STATE.currentUserAction = "neutral";
+      STATE.lastAlgorithmAction = "none";
       
       findVideoElement();
       setTimeout(() => extractMetadata(), 500);
@@ -556,6 +576,9 @@ function handleVideoCompletion(method) {
     }
     
     sendEvent('completed', STATE.watchedPercent);
+    if (STATE.currentUserAction === 'neutral') {
+      logCurrentVideoForTraining('completed');
+    }
     
     // NEW: Only auto-scroll if user hasn't shown intent to stay
     if (STATE.autoScrollEnabled && 
@@ -760,10 +783,15 @@ function extractMetadata(force = false) {
 
     let channelFound = false;
     let detectedChannelId = null;
+    let detectedChannelName = null;
 
     const channelElement = document.querySelector('a[href^="/channel/"], a[href^="/@"], ytd-channel-name a, #channel-name a, #owner-text a');
     if (channelElement) {
       const channelHref = channelElement.getAttribute('href');
+      const channelText = (channelElement.textContent || '').trim();
+      if (channelText) {
+        detectedChannelName = channelText.replace(/^@/, '');
+      }
       if (channelHref && channelHref.startsWith('/channel/')) {
         detectedChannelId = channelHref.split('/channel/')[1];
         channelFound = true;
@@ -778,7 +806,9 @@ function extractMetadata(force = false) {
       const channelNameElements = document.querySelectorAll('.ytd-channel-name, #channel-name, #text-container.ytd-channel-name, #owner-text a, #owner a');
       for (const element of channelNameElements) {
         if (element.textContent && element.textContent.trim()) {
-          detectedChannelId = element.textContent.trim();
+          const text = element.textContent.trim();
+          detectedChannelName = text.replace(/^@/, '');
+          if (!detectedChannelId) detectedChannelId = detectedChannelName;
           channelFound = true;
           console.log('[ShortsAI] Channel detected (Method 2):', detectedChannelId);
           break;
@@ -800,6 +830,9 @@ function extractMetadata(force = false) {
               channelFound = true;
             }
             if (channelFound) {
+              if (!detectedChannelName && link.textContent) {
+                detectedChannelName = link.textContent.trim().replace(/^@/, '');
+              }
               console.log('[ShortsAI] Channel detected (Method 3):', detectedChannelId);
               break;
             }
@@ -812,6 +845,7 @@ function extractMetadata(force = false) {
 
     if (channelFound) {
       STATE.currentChannelId = detectedChannelId;
+      STATE.currentChannelName = detectedChannelName || detectedChannelId;
     }
 
     const titleElement = document.querySelector('h1.ytd-watch-metadata, .title.ytd-video-primary-info-renderer, #title h1, .title');
@@ -824,6 +858,15 @@ function extractMetadata(force = false) {
     if (descriptionElement && descriptionElement.textContent) {
       STATE.currentDescription = descriptionElement.textContent.trim();
       console.log('[ShortsAI] Description detected (length):', STATE.currentDescription.length);
+    }
+
+
+    const captionsNodes = document.querySelectorAll('.ytp-caption-segment');
+    if (captionsNodes && captionsNodes.length) {
+      const joined = Array.from(captionsNodes).map((n) => (n.textContent || '').trim()).filter(Boolean).join(' ');
+      if (joined) {
+        STATE.currentCaptions = joined.slice(0, 300);
+      }
     }
 
     if (channelFound || STATE.currentTitle || STATE.currentDescription) {
@@ -919,7 +962,7 @@ function updateStatusOverlay() {
 `;
     status += `Video: ${STATE.currentVideoId || 'None'}  
 `;
-    status += `Channel: ${STATE.currentChannelId || 'Detecting...'}  
+    status += `Channel: ${STATE.currentChannelName || STATE.currentChannelId || 'Detecting...'}  
 `;
     status += `Score: ${STATE.score}  
 `;
@@ -1191,6 +1234,7 @@ function getPrediction() {
           !STATE.userOverrideActive) {
         console.log('[ShortsAI] Auto-skipping video with low score:', STATE.score);
         STATE.lastAutoScrollTrigger = 'low_score';
+        STATE.lastAlgorithmAction = 'scrolled';
         STATE.lastAutoScrolledVideoId = STATE.currentVideoId;
         
         const delay = STATE.badVideoCount > 0 && 
@@ -1381,6 +1425,7 @@ function checkAutoFeedback() {
       STATE.autoFeedbackType = 'like';
       STATE.autoFeedbackTimestamp = Date.now();
       STATE.autoFeedbackConfirmed = false;
+      STATE.lastAlgorithmAction = "liked";
       likeCurrentVideo();
       console.log(`[ShortsAI] AUTO-LIKED video with score: ${STATE.score} (threshold: ${CONFIG.likeThreshold})`);
       
@@ -1393,6 +1438,7 @@ function checkAutoFeedback() {
       STATE.autoFeedbackType = 'dislike';
       STATE.autoFeedbackTimestamp = Date.now();
       STATE.autoFeedbackConfirmed = false;
+      STATE.lastAlgorithmAction = "disliked";
       dislikeCurrentVideo();
       console.log(`[ShortsAI] AUTO-DISLIKED video with score: ${STATE.score} (threshold: ${CONFIG.dislikeThreshold})`);
       
@@ -1414,6 +1460,138 @@ function handleManualScroll() {
   } catch (error) {
     console.error('[ShortsAI] Error in handleManualScroll:', error);
   }
+}
+
+
+function extractTagsFromMeta() {
+  const tags = [];
+  document.querySelectorAll('meta[property="og:video:tag"], meta[name="keywords"]').forEach((el) => {
+    const content = (el.getAttribute('content') || '').trim();
+    if (!content) return;
+    content.split(',').map(x => x.trim()).filter(Boolean).forEach((tag) => tags.push(tag));
+  });
+  return [...new Set(tags)].slice(0, 20);
+}
+
+function getTimeBucket() {
+  const hour = new Date().getHours();
+  if (hour >= 5 && hour < 12) return 'morning';
+  if (hour >= 12 && hour < 17) return 'afternoon';
+  if (hour >= 17 && hour < 22) return 'evening';
+  return 'night';
+}
+
+function logCurrentVideoForTraining(reason = 'unknown') {
+  try {
+    if (!STATE.currentVideoId || STATE.loggedVideoIds.has(STATE.currentVideoId)) return;
+
+    const durationSeconds = STATE.videoElement && Number.isFinite(STATE.videoElement.duration) ? Math.max(0, Math.round(STATE.videoElement.duration)) : 0;
+    const payload = {
+      title: STATE.currentTitle || '',
+      description: STATE.currentDescription || '',
+      channel: STATE.currentChannelName || STATE.currentChannelId || '',
+      tags: extractTagsFromMeta(),
+      category: null,
+      subtitles_snippet: STATE.currentCaptions ? String(STATE.currentCaptions).slice(0, 300) : null,
+      duration_seconds: durationSeconds,
+      watch_percentage: Math.max(0, Math.min(1, (STATE.maxWatchedPercent || STATE.watchedPercent || 0) / 100)),
+      user_action: STATE.currentUserAction || 'neutral',
+      algorithm_action: STATE.lastAlgorithmAction || 'none',
+      day_of_week: ((new Date().getDay() + 6) % 7),
+      time_of_day_bucket: getTimeBucket(),
+      reason
+    };
+
+    fetch(`${CONFIG.apiBaseUrl}/log_video`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        STATE.loggedVideoIds.add(STATE.currentVideoId);
+        if (data.completed_chunk) {
+          STATE.pendingChunkFile = data.completed_chunk;
+          showDataSubmitPopup(data.completed_chunk);
+        }
+      })
+      .catch((err) => console.error('[ShortsAI] Failed to log training video:', err));
+  } catch (error) {
+    console.error('[ShortsAI] Error in logCurrentVideoForTraining:', error);
+  }
+}
+
+function createDataSubmitPopup() {
+  if (STATE.dataSubmitPopup) return;
+  const popup = document.createElement('div');
+  popup.id = 'shorts-ai-submit-popup';
+  popup.style.cssText = `
+    position: fixed;
+    left: 20px;
+    bottom: 140px;
+    z-index: 99999;
+    width: 320px;
+    background: rgba(18, 18, 18, 0.95);
+    color: #fff;
+    border: 1px solid rgba(255,255,255,0.2);
+    border-radius: 10px;
+    padding: 10px;
+    display: none;
+    font-family: Arial, sans-serif;
+  `;
+  popup.innerHTML = `
+    <div style="font-weight:700;margin-bottom:6px;">Help improve the algorithm for everyone?</div>
+    <div style="font-size:12px;line-height:1.4;margin-bottom:10px;">Your watch data (titles, descriptions, likes/dislikes — no personal info) can be submitted to train a better shared model.</div>
+    <div style="display:flex;gap:8px;">
+      <button id="shorts-ai-dismiss" style="flex:1;padding:6px;border-radius:6px;border:1px solid #555;background:#2d2d2d;color:white;">Dismiss</button>
+      <button id="shorts-ai-submit" style="flex:1;padding:6px;border-radius:6px;border:1px solid #2e7d32;background:#2e7d32;color:white;">Submit</button>
+    </div>
+    <div id="shorts-ai-submit-file" style="margin-top:8px;font-size:11px;opacity:.8;"></div>
+  `;
+  document.body.appendChild(popup);
+
+  popup.querySelector('#shorts-ai-dismiss').addEventListener('click', () => {
+    popup.style.display = 'none';
+  });
+
+  popup.querySelector('#shorts-ai-submit').addEventListener('click', () => submitPendingChunk());
+
+  STATE.dataSubmitPopup = popup;
+}
+
+function showDataSubmitPopup(chunkFile) {
+  if (!STATE.dataSubmitPopup || !chunkFile) return;
+  STATE.pendingChunkFile = chunkFile;
+  const note = STATE.dataSubmitPopup.querySelector('#shorts-ai-submit-file');
+  if (note) note.textContent = `Attach file: ${chunkFile.replace('.json', 'Uploaded.json')} from your extension folder.`;
+  STATE.dataSubmitPopup.style.display = 'block';
+}
+
+function checkChunkStatus() {
+  fetch(`${CONFIG.apiBaseUrl}/chunk_status`)
+    .then((res) => res.json())
+    .then((data) => {
+      if (data.show_popup && data.chunk_file) {
+        showDataSubmitPopup(data.chunk_file);
+      }
+    })
+    .catch((err) => console.warn('[ShortsAI] chunk_status unavailable:', err));
+}
+
+function submitPendingChunk() {
+  if (!STATE.pendingChunkFile) return;
+  fetch(`${CONFIG.apiBaseUrl}/submit_chunk`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chunk_file: STATE.pendingChunkFile })
+  })
+    .then((res) => res.json())
+    .then((data) => {
+      console.log('[ShortsAI] Chunk submitted:', data);
+      if (STATE.dataSubmitPopup) STATE.dataSubmitPopup.style.display = 'none';
+      STATE.pendingChunkFile = null;
+    })
+    .catch((err) => console.error('[ShortsAI] Failed to submit chunk:', err));
 }
 
 console.log("[ShortsAI] Content script loaded successfully (User Intent Detection Version)");
