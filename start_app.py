@@ -76,7 +76,10 @@ def pause_before_exit():
     """Keep output visible when script is launched by double-click."""
     # Windows double-click launches often have no interactive stdin.
     if os.name == "nt":
-        os.system("pause")
+        try:
+            subprocess.run(["cmd", "/c", "pause"], check=False)
+        except Exception:
+            pass
         return
 
     if sys.stdin and sys.stdin.isatty():

@@ -246,8 +246,7 @@ function initialize() {
 function handleScrollEvent(event) {
   try {
     const currentScrollY = window.scrollY;
-    const previousScrollY = STATE.lastScrollY || 0;
-    
+
     // Keep last position for potential future heuristics
     STATE.lastScrollY = currentScrollY;
   } catch (error) {
