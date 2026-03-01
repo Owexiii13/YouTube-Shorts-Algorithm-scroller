@@ -10,7 +10,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from .compress import compress_model
 from .config import (
     DEFAULT_DATA_FILE,
     DEFAULT_VOCAB_FILE,
@@ -23,10 +22,17 @@ from .config import (
     REPORTS_DIR,
     TRAIN_RATIO,
 )
-from .evaluate import append_metrics_history, compare_with_previous, evaluate_model
-from .features import DataValidationError, validate_entries
+from .ml_utils import (
+    DataValidationError,
+    append_metrics_history,
+    build_vocab,
+    compare_with_previous,
+    compress_model,
+    evaluate_model,
+    save_vocab,
+    validate_entries,
+)
 from .trainer_core import save_model, train_medium_model
-from .vocab_builder import build_vocab, save_vocab
 
 
 def load_entries(data_file: Path) -> List[dict]:

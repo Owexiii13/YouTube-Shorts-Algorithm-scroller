@@ -8,7 +8,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Dict, Iterable, List
 
-from .vocab_builder import entry_to_token_ids
+from .ml_utils import entry_to_token_ids
 
 
 class MediumModel:
