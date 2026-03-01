@@ -88,7 +88,6 @@ let STATE = {
   lastAutoScrolledVideoId: null,
   currentMood: 'Neutral',
   userHasGivenFeedback: false, // Track if user has manually given feedback
-  aiActionBlocked: false, // Block AI actions when user has taken control
   completionCheckInterval: null, // Interval for checking completion
   autoFeedbackConfirmationTimer: null, // Timer for confirming auto-feedback
   pageLoadTime: Date.now(), // Track when page loaded for click prevention
@@ -96,19 +95,12 @@ let STATE = {
   lastPercentageValue: 0, // Track last percentage value
   
   // NEW: User intent detection
-  userIntentToStay: false, // Whether user has shown intent to stay on current video
-  videoReturnCount: 0, // How many times user has returned to this video
-  lastScrollDirection: null, // 'up' or 'down'
-  videoStayTimer: null, // Timer to detect if user stays on video
-  userIntentDetected: false, // Whether we've detected user intent for current video
-  lastVideoInHistory: [], // Track last few videos to detect returns
-  scrollBackCount: 0, // Count of consecutive scroll-backs to same video
-  userOverrideActive: false, // Whether user has overridden AI for current video
   currentUserAction: "neutral",
   lastAlgorithmAction: "none",
   loggedVideoIds: new Set(),
   dataSubmitPopup: null,
-  pendingChunkFile: null
+  pendingChunkFile: null,
+  lastVideoInHistory: []
 };
 
 console.log("[ShortsAI] Content script loading (User Intent Detection Version)...");
@@ -255,35 +247,11 @@ function handleScrollEvent(event) {
     const currentScrollY = window.scrollY;
     const previousScrollY = STATE.lastScrollY || 0;
     
-    // Determine scroll direction
-    if (currentScrollY > previousScrollY) {
-      STATE.lastScrollDirection = 'down';
-    } else if (currentScrollY < previousScrollY) {
-      STATE.lastScrollDirection = 'up';
-      
-
-    }
-    
+    // Keep last position for potential future heuristics
     STATE.lastScrollY = currentScrollY;
-    
-
   } catch (error) {
     console.error('[ShortsAI] Error in handleScrollEvent:', error);
   }
-}
-
-// NEW: Check if user is returning to a previous video
-function checkForVideoReturn() {
-  // disabled: this caused false positives in Shorts navigation
-}
-
-// NEW: Start timer to detect if user stays on video
-function startUserIntentTimer() {
-  // disabled: timer-based user intent detection was creating false positives
-}
-
-function handleUserIntentToStay(reason) {
-  // disabled: explicit manual feedback is already captured without forcing override mode
 }
 
 function debounce(func, delay) {
@@ -348,10 +316,6 @@ function detectCurrentVideo() {
         clearTimeout(STATE.autoFeedbackConfirmationTimer);
         STATE.autoFeedbackConfirmationTimer = null;
       }
-      if (STATE.videoStayTimer) {
-        clearTimeout(STATE.videoStayTimer);
-        STATE.videoStayTimer = null;
-      }
       
       // Reset state for new video
       STATE.currentVideoId = videoId;
@@ -381,15 +345,10 @@ function detectCurrentVideo() {
       STATE.badVideoCount = 0;
       STATE.lastBadVideoTimestamp = 0;
       STATE.userHasGivenFeedback = false; // Reset for new video
-      STATE.aiActionBlocked = false; // Reset for new video
       STATE.stuckPercentageCount = 0; // Reset stuck counter
       STATE.lastPercentageValue = 0; // Reset last percentage
       
       // NEW: Reset user intent detection for new video
-      STATE.userIntentToStay = false;
-      STATE.userIntentDetected = false;
-      STATE.scrollBackCount = 0;
-      STATE.userOverrideActive = false;
       STATE.currentUserAction = "neutral";
       STATE.lastAlgorithmAction = "none";
       
