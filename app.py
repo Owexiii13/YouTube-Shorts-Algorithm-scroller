@@ -19,15 +19,21 @@ app.add_middleware(
 # Initialize the model
 model = ShortsAIModel()
 
+
 class EventRequest(BaseModel):
     video_id: str
     channel_id: str
     title: str = ""
     description: str = ""
     captions: str = ""
+    category: str = ""
+    duration_seconds: Optional[float] = None
     event_type: str
     watched_percent: float = 0.0
     mood: str = "Neutral"
+    algorithm_action: Optional[str] = None
+    user_action: Optional[str] = None
+
 
 class PredictionRequest(BaseModel):
     video_id: str
@@ -35,10 +41,14 @@ class PredictionRequest(BaseModel):
     title: str = ""
     description: str = ""
     captions: str = ""
+    category: str = ""
+    duration_seconds: Optional[float] = None
+
 
 @app.get("/")
 async def root():
     return {"message": "YouTube Shorts AI Personalizer API", "status": "running"}
+
 
 @app.post("/event")
 async def process_event(request: EventRequest):
@@ -48,11 +58,19 @@ async def process_event(request: EventRequest):
             channel_id=request.channel_id,
             event_type=request.event_type,
             watched_percent=request.watched_percent,
-            mood=request.mood
+            mood=request.mood,
+            title=request.title,
+            description=request.description,
+            captions=request.captions,
+            category=request.category,
+            duration_seconds=request.duration_seconds,
+            algorithm_action=request.algorithm_action,
+            user_action=request.user_action,
         )
         return {"status": "success", "corrections_made": result.get("corrections_made", 0)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/next")
 async def get_prediction(request: PredictionRequest):
@@ -62,11 +80,14 @@ async def get_prediction(request: PredictionRequest):
             channel_id=request.channel_id,
             title=request.title,
             description=request.description,
-            captions=request.captions
+            captions=request.captions,
+            category=request.category,
+            duration_seconds=request.duration_seconds,
         )
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/channel_status")
 async def get_channel_status(channel_id: str):
@@ -76,6 +97,7 @@ async def get_channel_status(channel_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.get("/buffer_size")
 async def get_buffer_size():
     try:
@@ -83,6 +105,7 @@ async def get_buffer_size():
         return {"buffer_size": buffer_size}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/mood")
 async def get_current_mood():
@@ -92,6 +115,7 @@ async def get_current_mood():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.post("/mood")
 async def set_mood(mood: str):
     try:
@@ -99,6 +123,7 @@ async def set_mood(mood: str):
         return {"status": "success", "current_mood": model.get_current_mood()}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/mood/suggest")
 async def suggest_mood():
@@ -108,8 +133,9 @@ async def suggest_mood():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 if __name__ == "__main__":
     print("Starting YouTube Shorts AI Personalizer backend...")
-    print("Server will be available at: http://localhost:8000" )
-    print("API documentation at: http://localhost:8000/docs" )
+    print("Server will be available at: http://localhost:8000")
+    print("API documentation at: http://localhost:8000/docs")
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)

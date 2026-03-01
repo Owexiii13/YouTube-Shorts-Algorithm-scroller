@@ -6,8 +6,11 @@ const CONFIG = {
   autoFeedback: true,
   zeroDelayScroll: true,
   autoSkipThreshold: 0,
-  likeThreshold: 2,           // LOWER = MORE SENSITIVE (try 1-2 for very sensitive, 5-10 for less sensitive)
-  dislikeThreshold: -1,       // LOWER = MORE SENSITIVE (try -1 for very sensitive, -5 for less sensitive)
+  likeThreshold: 2,           // legacy score threshold
+  dislikeThreshold: -1,       // legacy score threshold
+  likeProbabilityThreshold: 0.62,
+  dislikeProbabilityThreshold: 0.62,
+  skipProbabilityThreshold: 0.45,
   minScrollInterval: 500,     // Reduced for better responsiveness
   debugMode: true,
   statusOverlay: true,
@@ -52,6 +55,10 @@ let STATE = {
   autoFeedbackConfirmed: false, // Whether auto-feedback was confirmed (not undone )
   metadataExtracted: false,
   score: 0,
+  pLike: 0,
+  pDislike: 0,
+  pNeutral: 1,
+  algorithmAction: 'neutral',
   statusElement: null,
   controlPanel: null,
   controlPanelVisible: false,
@@ -175,7 +182,7 @@ function initialize() {
           
           if (isNowLiked) {
             console.log("[ShortsAI] Video manually liked by user - POSITIVE FEEDBACK");
-            sendEvent("user_like", 12);
+            sendEvent("user_like", 12, STATE.currentMood, "like");
           } else {
             console.log("[ShortsAI] User removed like");
             sendEvent("user_unlike", 0);
@@ -206,7 +213,7 @@ function initialize() {
           
           if (isNowDisliked) {
             console.log("[ShortsAI] Video manually disliked by user - NEGATIVE FEEDBACK");
-            sendEvent("user_dislike", -12);
+            sendEvent("user_dislike", -12, STATE.currentMood, "dislike");
           } else {
             console.log("[ShortsAI] User removed dislike");
             sendEvent("user_undislike", 0);
@@ -260,7 +267,7 @@ function handleScrollEvent(event) {
     // Handle manual scroll (existing functionality)
     if (STATE.currentVideoId && !STATE.videoCompleted) {
       console.log('[ShortsAI] Manual scroll detected');
-      sendEvent('manual_skip', STATE.watchedPercent);
+      sendEvent('manual_skip', STATE.watchedPercent, STATE.currentMood, 'skip');
     }
   } catch (error) {
     console.error('[ShortsAI] Error in handleScrollEvent:', error);
@@ -432,6 +439,10 @@ function detectCurrentVideo() {
       STATE.autoFeedbackConfirmed = false;
       STATE.metadataExtracted = false;
       STATE.score = 0;
+      STATE.pLike = 0;
+      STATE.pDislike = 0;
+      STATE.pNeutral = 1;
+      STATE.algorithmAction = 'neutral';
       STATE.lastVideoChange = Date.now();
       STATE.watchStartTime = Date.now();
       STATE.channelDetectionAttempts = 0;
@@ -921,7 +932,7 @@ function updateStatusOverlay() {
 `;
     status += `Channel: ${STATE.currentChannelId || 'Detecting...'}  
 `;
-    status += `Score: ${STATE.score}  
+    status += `Score: ${STATE.score} | P(like): ${STATE.pLike.toFixed(2)} | P(dislike): ${STATE.pDislike.toFixed(2)} | P(neutral): ${STATE.pNeutral.toFixed(2)} | Action: ${STATE.algorithmAction}  
 `;
     status += `Watched: ${STATE.watchedPercent.toFixed(1)}%  
 `;
@@ -1108,7 +1119,7 @@ function setupKeyboardShortcuts() {
 
 // --- API Communication ---
 
-function sendEvent(eventType, watchedPercent = STATE.watchedPercent, mood = STATE.currentMood) {
+function sendEvent(eventType, watchedPercent = STATE.watchedPercent, mood = STATE.currentMood, userAction = null) {
   try {
     if (!STATE.currentVideoId) {
       console.warn('[ShortsAI] Cannot send event: no current video ID');
@@ -1121,9 +1132,13 @@ function sendEvent(eventType, watchedPercent = STATE.watchedPercent, mood = STAT
       title: STATE.currentTitle || '',
       description: STATE.currentDescription || '',
       captions: STATE.currentCaptions || '',
+      category: '',
+      duration_seconds: (STATE.videoElement && isFinite(STATE.videoElement.duration)) ? STATE.videoElement.duration : null,
       event_type: eventType,
       watched_percent: watchedPercent,
-      mood: mood
+      mood: mood,
+      algorithm_action: STATE.algorithmAction || 'neutral',
+      user_action: userAction
     };
 
     console.log('[ShortsAI] Sending event:', eventType, eventData);
@@ -1161,7 +1176,9 @@ function getPrediction() {
       channel_id: STATE.currentChannelId || 'unknown',
       title: STATE.currentTitle || '',
       description: STATE.currentDescription || '',
-      captions: STATE.currentCaptions || ''
+      captions: STATE.currentCaptions || '',
+      category: '',
+      duration_seconds: (STATE.videoElement && isFinite(STATE.videoElement.duration)) ? STATE.videoElement.duration : null
     };
 
     console.log('[ShortsAI] Getting prediction for:', metadata);
@@ -1177,7 +1194,11 @@ function getPrediction() {
     .then(data => {
       console.log('[ShortsAI] Prediction response:', data);
       STATE.score = data.score || 0;
-      
+      STATE.pLike = Number(data.p_like || 0);
+      STATE.pDislike = Number(data.p_dislike || 0);
+      STATE.pNeutral = Number(data.p_neutral || 0);
+      STATE.algorithmAction = data.decision || 'neutral';
+
       if (data.mood_suggestion && data.mood_suggestion !== STATE.currentMood) {
         console.log('[ShortsAI] AI suggests mood change to:', data.mood_suggestion);
       }
@@ -1185,7 +1206,7 @@ function getPrediction() {
       updateStatusOverlay();
       
       // NEW: Only auto-skip if user hasn't shown intent to stay
-      if (STATE.score <= CONFIG.autoSkipThreshold && 
+      if ((STATE.algorithmAction === 'skip' || STATE.algorithmAction === 'dislike' || STATE.pDislike >= CONFIG.skipProbabilityThreshold || STATE.score <= CONFIG.autoSkipThreshold) && 
           STATE.autoScrollEnabled && 
           !STATE.userIntentToStay && 
           !STATE.userOverrideActive) {
@@ -1325,7 +1346,7 @@ function likeCurrentVideo() {
     if (likeButton) {
       likeButton.click();
       console.log('[ShortsAI] Liked video');
-      sendEvent('like', STATE.watchedPercent);
+      sendEvent('like', STATE.watchedPercent, STATE.currentMood, 'like');
     }
   } catch (error) {
     console.error('[ShortsAI] Error liking video:', error);
@@ -1338,7 +1359,7 @@ function dislikeCurrentVideo() {
     if (dislikeButton) {
       dislikeButton.click();
       console.log('[ShortsAI] Disliked video');
-      sendEvent('dislike', STATE.watchedPercent);
+      sendEvent('dislike', STATE.watchedPercent, STATE.currentMood, 'dislike');
     }
   } catch (error) {
     console.error('[ShortsAI] Error disliking video:', error);
@@ -1376,7 +1397,7 @@ function checkAutoFeedback() {
       return;
     }
 
-    if (STATE.score >= CONFIG.likeThreshold) {
+    if (STATE.pLike >= CONFIG.likeProbabilityThreshold || STATE.score >= CONFIG.likeThreshold) {
       STATE.pendingAutoFeedback = true;
       STATE.autoFeedbackType = 'like';
       STATE.autoFeedbackTimestamp = Date.now();
@@ -1388,7 +1409,7 @@ function checkAutoFeedback() {
         confirmAutoFeedback();
       }, CONFIG.autoFeedbackConfirmationTime);
       
-    } else if (STATE.score <= CONFIG.dislikeThreshold) {
+    } else if (STATE.pDislike >= CONFIG.dislikeProbabilityThreshold || STATE.score <= CONFIG.dislikeThreshold) {
       STATE.pendingAutoFeedback = true;
       STATE.autoFeedbackType = 'dislike';
       STATE.autoFeedbackTimestamp = Date.now();
@@ -1409,7 +1430,7 @@ function handleManualScroll() {
   try {
     if (STATE.currentVideoId && !STATE.videoCompleted) {
       console.log('[ShortsAI] Manual scroll detected');
-      sendEvent('manual_skip', STATE.watchedPercent);
+      sendEvent('manual_skip', STATE.watchedPercent, STATE.currentMood, 'skip');
     }
   } catch (error) {
     console.error('[ShortsAI] Error in handleManualScroll:', error);

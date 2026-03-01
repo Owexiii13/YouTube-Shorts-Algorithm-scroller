@@ -2,11 +2,43 @@ import json
 import os
 import time
 import random
+import glob
+import re
 from collections import deque
+
+try:
+    import torch
+    import torch.nn as nn
+except Exception:
+    torch = None
+    nn = None
+
+from features import FeatureBuilder
+
+
+if nn is not None:
+    class _SimpleClassifier(nn.Module):
+        def __init__(self, input_dim):
+            super().__init__()
+            self.net = nn.Sequential(
+                nn.Linear(input_dim, 32),
+                nn.ReLU(),
+                nn.Linear(32, 3)
+            )
+
+        def forward(self, x):
+            return self.net(x)
+else:
+    _SimpleClassifier = None
 
 class ShortsAIModel:
     def __init__(self, data_file='shorts_ai_data.json'):
         self.data_file = data_file
+        self.feature_builder = FeatureBuilder('vocab.json')
+        self.base_model = None
+        self.user_model = None
+        self.user_model_path = 'UserModel.pt'
+        self.inference_available = torch is not None and self.feature_builder.total_dim > 0
         self.user_preferences = {
             'video_scores': {},
             'channel_scores': {},
@@ -30,9 +62,147 @@ class ShortsAIModel:
         self.load_data()
         self.buffer = deque(maxlen=20)
         self.last_mood_check = time.time()
+        self._load_models()
         
         # Enhanced learning rate for faster adaptation
         self.learning_rate = 0.3  # Increased from 0.25 to 0.3 for even faster learning
+
+    def _find_highest_version_model(self):
+        best_path = None
+        best_ver = (-1, -1)
+        for path in glob.glob('Model*.pt'):
+            match = re.search(r'Model(\d+)\.(\d+)\.pt$', os.path.basename(path))
+            if not match:
+                continue
+            ver = (int(match.group(1)), int(match.group(2)))
+            if ver > best_ver:
+                best_ver = ver
+                best_path = path
+        return best_path
+
+    def _safe_load_torch_model(self, path):
+        if not self.inference_available or not path or not os.path.exists(path):
+            return None
+        try:
+            model = _SimpleClassifier(self.feature_builder.total_dim)
+            loaded = torch.load(path, map_location='cpu')
+            state_dict = loaded.get('state_dict', loaded) if isinstance(loaded, dict) else loaded
+            model.load_state_dict(state_dict, strict=False)
+            model.eval()
+            return model
+        except Exception as e:
+            print(f"[Model] Could not load model from {path}: {e}")
+            return None
+
+    def _load_models(self):
+        if not self.inference_available:
+            print('[Model] Torch/vocab unavailable; using rule-based fallback only')
+            return
+
+        base_path = self._find_highest_version_model()
+        if base_path:
+            self.base_model = self._safe_load_torch_model(base_path)
+            if self.base_model:
+                print(f'[Model] Loaded base model: {base_path}')
+
+        self.user_model = self._safe_load_torch_model(self.user_model_path)
+        if self.user_model:
+            print(f'[Model] Loaded user model: {self.user_model_path}')
+
+    def _rule_based_probabilities(self, score):
+        score = max(-100.0, min(100.0, float(score)))
+        p_like = max(0.0, score) / 100.0
+        p_dislike = max(0.0, -score) / 100.0
+        p_neutral = max(0.0, 1.0 - (p_like + p_dislike))
+        total = p_like + p_dislike + p_neutral or 1.0
+        return {
+            'p_like': p_like / total,
+            'p_dislike': p_dislike / total,
+            'p_neutral': p_neutral / total,
+        }
+
+    def _predict_probabilities(self, title='', description='', subtitles='', category='', duration_seconds=None):
+        if not self.inference_available:
+            return None
+        if not self.base_model and not self.user_model:
+            return None
+        try:
+            vector = self.feature_builder.build_vector(
+                title=title,
+                description=description,
+                subtitles=subtitles,
+                category=category,
+                duration_seconds=duration_seconds,
+                timestamp=time.time(),
+            )
+            x = torch.tensor(vector, dtype=torch.float32).unsqueeze(0)
+            logits = torch.zeros((1, 3), dtype=torch.float32)
+            if self.base_model:
+                self.base_model.eval()
+                logits = logits + self.base_model(x)
+            if self.user_model:
+                self.user_model.eval()
+                logits = logits + 0.6 * self.user_model(x)
+            probs = torch.softmax(logits, dim=1).squeeze(0).tolist()
+            return {'p_like': probs[0], 'p_dislike': probs[1], 'p_neutral': probs[2]}
+        except Exception as e:
+            print(f'[Model] Inference failed, using fallback: {e}')
+            return None
+
+    def _probabilities_to_decision(self, p_like, p_dislike, p_neutral):
+        if p_like >= 0.62 and p_like > p_dislike:
+            return 'like'
+        if p_dislike >= 0.62 and p_dislike > p_like:
+            return 'dislike'
+        if p_dislike >= 0.45 and p_like <= 0.30:
+            return 'skip'
+        return 'neutral'
+
+    def _tiny_incremental_finetune(self, event_type, title='', description='', subtitles='', category='', duration_seconds=None):
+        if torch is None:
+            return
+
+        label_map = {'user_like': 0, 'like': 0, 'user_dislike': 1, 'dislike': 1}
+        if event_type not in label_map:
+            return
+
+        if not self.user_model:
+            if self.base_model:
+                self.user_model = _SimpleClassifier(self.feature_builder.total_dim)
+                self.user_model.load_state_dict(self.base_model.state_dict(), strict=False)
+            elif self.inference_available:
+                self.user_model = _SimpleClassifier(self.feature_builder.total_dim)
+            else:
+                return
+
+        try:
+            vector = self.feature_builder.build_vector(
+                title=title,
+                description=description,
+                subtitles=subtitles,
+                category=category,
+                duration_seconds=duration_seconds,
+                timestamp=time.time(),
+            )
+            x = torch.tensor(vector, dtype=torch.float32).unsqueeze(0)
+            y = torch.tensor([label_map[event_type]], dtype=torch.long)
+
+            self.user_model.train()
+            optimizer = torch.optim.Adam(self.user_model.parameters(), lr=5e-5)
+            criterion = nn.CrossEntropyLoss()
+
+            for _ in range(random.randint(1, 3)):
+                optimizer.zero_grad()
+                logits = self.user_model(x)
+                loss = criterion(logits, y)
+                loss.backward()
+                optimizer.step()
+
+            self.user_model.eval()
+            torch.save({'state_dict': self.user_model.state_dict()}, self.user_model_path)
+            print('[Model] Saved incremental user model update to UserModel.pt')
+        except Exception as e:
+            print(f'[Model] Incremental fine-tuning skipped due to error: {e}')
 
     def load_data(self):
         if os.path.exists(self.data_file):
@@ -118,7 +288,7 @@ class ShortsAIModel:
             print(f"[Model] Mood changed from {old_mood} to {mood}")
             self.save_data()
 
-    def process_event(self, video_id, channel_id, event_type, watched_percent, mood='Neutral'):
+    def process_event(self, video_id, channel_id, event_type, watched_percent, mood='Neutral', title='', description='', captions='', category='', duration_seconds=None, algorithm_action=None, user_action=None):
         print(f"[Model] Processing event: {event_type} for video {video_id} (mood: {mood})")
         
         # Update current mood
@@ -241,6 +411,18 @@ class ShortsAIModel:
         elif event_type == 'unblock_channel':
             self.user_preferences['blocked_channels'].discard(channel_id)
         
+        if algorithm_action or user_action:
+            print(f"[Model] Action log - algorithm_action={algorithm_action}, user_action={user_action}")
+
+        self._tiny_incremental_finetune(
+            event_type=event_type,
+            title=title,
+            description=description,
+            subtitles=captions,
+            category=category,
+            duration_seconds=duration_seconds,
+        )
+
         self.save_data()
         return {'corrections_made': corrections_made}
 
@@ -271,7 +453,7 @@ class ShortsAIModel:
         
         print(f"[Model] Updated scores for {video_id} (mood: {mood}): video={self.user_preferences['video_scores'][video_id]:.1f}, channel={self.user_preferences['channel_scores'][channel_id]:.1f}, change={score_change:.1f}")
 
-    def predict_score(self, video_id, channel_id, title='', description='', captions=''):
+    def predict_score(self, video_id, channel_id, title='', description='', captions='', category='', duration_seconds=None):
         current_mood = self.get_current_mood()
         
         # Check if this video was previously watched
@@ -358,7 +540,28 @@ class ShortsAIModel:
         
         mood_suggestion = self.suggest_mood_change()
 
-        return {'score': round(final_score), 'mood_suggestion': mood_suggestion}
+        probs = self._predict_probabilities(
+            title=title,
+            description=description,
+            subtitles=captions,
+            category=category,
+            duration_seconds=duration_seconds,
+        )
+        if probs is None:
+            probs = self._rule_based_probabilities(final_score)
+
+        decision = self._probabilities_to_decision(
+            probs['p_like'], probs['p_dislike'], probs['p_neutral']
+        )
+
+        return {
+            'score': round(final_score),
+            'p_like': round(probs['p_like'], 4),
+            'p_dislike': round(probs['p_dislike'], 4),
+            'p_neutral': round(probs['p_neutral'], 4),
+            'decision': decision,
+            'mood_suggestion': mood_suggestion
+        }
 
     def get_channel_status(self, channel_id):
         trusted = channel_id in self.user_preferences['trusted_channels']
