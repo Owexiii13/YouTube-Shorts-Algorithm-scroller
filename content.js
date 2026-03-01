@@ -70,6 +70,7 @@ let STATE = {
   videoChangeDetected: false,
   scrollAttempts: 0,
   lastScrollAttempt: 0,
+  lastScrollY: 0,
   scrollMethods: ['keydown', 'click', 'scroll', 'swipe', 'api'],
   currentScrollMethod: 0,
   videoCompletionDetectionMethods: ['ended', 'percent', 'stalled', 'timeupdate'],
