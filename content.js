@@ -101,7 +101,9 @@ let STATE = {
   loggedVideoIds: new Set(),
   dataSubmitPopup: null,
   pendingChunkFile: null,
-  lastVideoInHistory: []
+  lastVideoInHistory: [],
+  autoActionInProgress: false,
+  autoActionType: null
 };
 
 console.log("[ShortsAI] Content script loading (User Intent Detection Version)...");
@@ -149,6 +151,11 @@ function initialize() {
       // Detect manual like/dislike actions
       const likeButton = event.target.closest('yt-icon-button[aria-label*="like"], button[aria-label*="like"]');
       const dislikeButton = event.target.closest('yt-icon-button[aria-label*="dislike"], button[aria-label*="dislike"]');
+
+      if (STATE.autoActionInProgress && (likeButton || dislikeButton)) {
+        console.log('[ShortsAI] Ignoring auto-generated feedback click event');
+        return;
+      }
 
       if (likeButton && STATE.currentVideoId) {
         console.log("[ShortsAI] Manual like action detected");
@@ -208,6 +215,7 @@ function initialize() {
             STATE.currentUserAction = "disliked";
             sendEvent("user_dislike", -12);
             logCurrentVideoForTraining("manual_dislike");
+            setTimeout(() => scrollToNextVideo(), 250);
           } else {
             console.log("[ShortsAI] User removed dislike");
             sendEvent("user_undislike", 0);
@@ -603,19 +611,19 @@ function updateWatchedPercent() {
         return;
       }
 
-      if (newPercent < STATE.lastValidWatchedPercent - 20 && STATE.lastValidWatchedPercent > 10) {
-        console.log(`[ShortsAI] Watched percent glitch detected (dropped from ${STATE.lastValidWatchedPercent.toFixed(1)}% to ${newPercent.toFixed(1)}%). Using max: ${STATE.maxWatchedPercent.toFixed(1)}%`);
-        STATE.watchedPercent = STATE.maxWatchedPercent;
-      } else if (newPercent < 5 && STATE.maxWatchedPercent > 50) {
-        console.log(`[ShortsAI] Video restart detected. Using max watched: ${STATE.maxWatchedPercent.toFixed(1)}%`);
-        STATE.watchedPercent = STATE.maxWatchedPercent;
+      const timeRemaining = STATE.videoElement.duration - STATE.videoElement.currentTime;
+      if (STATE.videoElement.ended || (timeRemaining <= 0.4 && newPercent > 75)) {
+        STATE.watchedPercent = 100;
+        STATE.lastValidWatchedPercent = 100;
+      } else if (newPercent < STATE.lastValidWatchedPercent - 30 && STATE.lastValidWatchedPercent > 15) {
+        // Ignore abrupt loop/glitch drops but allow forward movement.
+        STATE.watchedPercent = Math.max(STATE.watchedPercent, STATE.lastValidWatchedPercent);
       } else {
-        STATE.watchedPercent = newPercent;
-        STATE.lastValidWatchedPercent = newPercent;
+        STATE.watchedPercent = Math.max(0, Math.min(100, newPercent));
+        STATE.lastValidWatchedPercent = STATE.watchedPercent;
       }
 
       STATE.maxWatchedPercent = Math.max(STATE.maxWatchedPercent, STATE.watchedPercent);
-
     } else {
       STATE.watchedPercent = 0;
       STATE.lastValidWatchedPercent = 0;
@@ -654,60 +662,44 @@ function extractMetadata(force = false) {
     let detectedChannelId = null;
     let detectedChannelName = null;
 
-    const channelElement = document.querySelector('ytd-reel-player-header-renderer #channel-name a, ytd-reel-player-header-renderer a[href^="/@"], ytd-reel-player-header-renderer a[href^="/channel/"]');
-    if (channelElement) {
-      const channelHref = channelElement.getAttribute('href');
-      const channelText = (channelElement.textContent || '').trim();
-      if (channelText) {
-        detectedChannelName = channelText.replace(/^@/, '');
-      }
-      if (channelHref && channelHref.startsWith('/channel/')) {
-        detectedChannelId = channelHref.split('/channel/')[1];
+    const channelSelectors = [
+      'ytd-reel-player-header-renderer #channel-name a',
+      'ytd-reel-player-header-renderer a[href^="/@"]',
+      'ytd-reel-player-header-renderer a[href^="/channel/"]',
+      'ytd-reel-video-renderer #channel-name a',
+      'ytd-reel-video-renderer a[href^="/@"]',
+      '#owner a[href^="/@"]',
+      '#owner a[href^="/channel/"]',
+      'a.yt-simple-endpoint[href^="/@"]',
+      'a.yt-simple-endpoint[href^="/channel/"]'
+    ];
+
+    for (const selector of channelSelectors) {
+      const el = document.querySelector(selector);
+      if (!el) continue;
+      const href = el.getAttribute('href') || '';
+      const txt = (el.textContent || '').trim();
+      if (txt) detectedChannelName = txt.replace(/^@/, '');
+      if (href.startsWith('/channel/')) {
+        detectedChannelId = href.split('/channel/')[1].split('?')[0];
         channelFound = true;
-      } else if (channelHref && channelHref.startsWith('/@')) {
-        detectedChannelId = channelHref.substring(2);
-        channelFound = true;
+        break;
       }
-      if (channelFound) console.log('[ShortsAI] Channel detected (Method 1):', detectedChannelId);
+      if (href.startsWith('/@')) {
+        detectedChannelId = href.substring(2).split('?')[0];
+        channelFound = true;
+        break;
+      }
     }
 
-    if (!channelFound && CONFIG.aggressiveChannelDetection) {
-      const channelNameElements = document.querySelectorAll('ytd-reel-player-header-renderer #channel-name a, ytd-reel-player-header-renderer #owner-text a');
-      for (const element of channelNameElements) {
-        if (element.textContent && element.textContent.trim()) {
-          const text = element.textContent.trim();
-          detectedChannelName = text.replace(/^@/, '');
-          if (!detectedChannelId) detectedChannelId = detectedChannelName;
+    if (!channelFound) {
+      const authorMeta = document.querySelector('meta[itemprop="author"], link[rel="author"]');
+      if (authorMeta) {
+        const content = authorMeta.getAttribute('content') || authorMeta.getAttribute('href') || '';
+        if (content) {
+          detectedChannelName = detectedChannelName || content.replace(/^@/, '').trim();
+          detectedChannelId = detectedChannelId || detectedChannelName;
           channelFound = true;
-          console.log('[ShortsAI] Channel detected (Method 2):', detectedChannelId);
-          break;
-        }
-      }
-    }
-
-    if (!channelFound && CONFIG.aggressiveChannelDetection) {
-      const authorLinks = document.querySelectorAll('ytd-reel-player-header-renderer a[href^="/@"], ytd-reel-player-header-renderer a[href^="/channel/"]');
-      for (const link of authorLinks) {
-        try {
-          if (link.href && (link.href.includes('/channel/') || link.href.includes('/@'))) {
-            const href = link.href;
-            if (href.includes('/channel/')) {
-              detectedChannelId = href.split('/channel/')[1].split('?')[0];
-              channelFound = true;
-            } else if (href.includes('/@')) {
-              detectedChannelId = href.split('/@')[1].split('?')[0];
-              channelFound = true;
-            }
-            if (channelFound) {
-              if (!detectedChannelName && link.textContent) {
-                detectedChannelName = link.textContent.trim().replace(/^@/, '');
-              }
-              console.log('[ShortsAI] Channel detected (Method 3):', detectedChannelId);
-              break;
-            }
-          }
-        } catch (error) {
-          console.warn('[ShortsAI] Error processing author link:', error);
         }
       }
     }
@@ -715,20 +707,18 @@ function extractMetadata(force = false) {
     if (channelFound) {
       STATE.currentChannelId = detectedChannelId;
       STATE.currentChannelName = detectedChannelName || detectedChannelId;
+      console.log('[ShortsAI] Channel detected:', STATE.currentChannelName || STATE.currentChannelId);
     }
 
-    const titleElement = document.querySelector('h1.ytd-watch-metadata, .title.ytd-video-primary-info-renderer, #title h1, .title');
+    const titleElement = document.querySelector('ytd-reel-player-header-renderer h2, h1.ytd-watch-metadata, #title h1, .title');
     if (titleElement && titleElement.textContent) {
       STATE.currentTitle = titleElement.textContent.trim();
-      console.log('[ShortsAI] Title detected:', STATE.currentTitle);
     }
 
-    const descriptionElement = document.querySelector('#description, .description, .content.ytd-video-secondary-info-renderer');
+    const descriptionElement = document.querySelector('#description, ytd-reel-player-header-renderer #description-text, .description, .content.ytd-video-secondary-info-renderer');
     if (descriptionElement && descriptionElement.textContent) {
       STATE.currentDescription = descriptionElement.textContent.trim();
-      console.log('[ShortsAI] Description detected (length):', STATE.currentDescription.length);
     }
-
 
     const captionsNodes = document.querySelectorAll('.ytp-caption-segment');
     if (captionsNodes && captionsNodes.length) {
@@ -740,7 +730,6 @@ function extractMetadata(force = false) {
 
     if (channelFound || STATE.currentTitle || STATE.currentDescription) {
       STATE.metadataExtracted = true;
-      console.log('[ShortsAI] Metadata extraction completed');
       updateStatusOverlay();
       return true;
     }
@@ -970,13 +959,13 @@ function setupKeyboardShortcuts() {
         case 'l':
           if (event.ctrlKey) {
             event.preventDefault();
-            likeCurrentVideo();
+            likeCurrentVideo('auto');
           }
           break;
         case 'd':
           if (event.ctrlKey) {
             event.preventDefault();
-            dislikeCurrentVideo();
+            dislikeCurrentVideo('auto');
           }
           break;
         case 't':
@@ -1213,26 +1202,30 @@ function scrollToNextVideo() {
   }
 }
 
-function likeCurrentVideo() {
+function likeCurrentVideo(source = 'manual') {
   try {
     const likeButton = document.querySelector('yt-icon-button[aria-label*="like"], button[aria-label*="like"]');
     if (likeButton) {
       likeButton.click();
       console.log('[ShortsAI] Liked video');
-      sendEvent('like', STATE.watchedPercent);
+      if (source === 'manual') {
+        sendEvent('like', STATE.watchedPercent);
+      }
     }
   } catch (error) {
     console.error('[ShortsAI] Error liking video:', error);
   }
 }
 
-function dislikeCurrentVideo() {
+function dislikeCurrentVideo(source = 'manual') {
   try {
     const dislikeButton = document.querySelector('yt-icon-button[aria-label*="dislike"], button[aria-label*="dislike"]');
     if (dislikeButton) {
       dislikeButton.click();
       console.log('[ShortsAI] Disliked video');
-      sendEvent('dislike', STATE.watchedPercent);
+      if (source === 'manual') {
+        sendEvent('dislike', STATE.watchedPercent);
+      }
     }
   } catch (error) {
     console.error('[ShortsAI] Error disliking video:', error);
@@ -1272,7 +1265,10 @@ function checkAutoFeedback() {
       STATE.autoFeedbackTimestamp = Date.now();
       STATE.autoFeedbackConfirmed = false;
       STATE.lastAlgorithmAction = "liked";
-      likeCurrentVideo();
+      STATE.autoActionInProgress = true;
+      STATE.autoActionType = 'like';
+      likeCurrentVideo('auto');
+      setTimeout(() => { STATE.autoActionInProgress = false; STATE.autoActionType = null; }, 800);
       console.log(`[ShortsAI] AUTO-LIKED video with score: ${STATE.score} (threshold: ${CONFIG.likeThreshold})`);
       
       STATE.autoFeedbackConfirmationTimer = setTimeout(() => {
@@ -1285,12 +1281,16 @@ function checkAutoFeedback() {
       STATE.autoFeedbackTimestamp = Date.now();
       STATE.autoFeedbackConfirmed = false;
       STATE.lastAlgorithmAction = "disliked";
-      dislikeCurrentVideo();
+      STATE.autoActionInProgress = true;
+      STATE.autoActionType = 'dislike';
+      dislikeCurrentVideo('auto');
+      setTimeout(() => { STATE.autoActionInProgress = false; STATE.autoActionType = null; }, 800);
       console.log(`[ShortsAI] AUTO-DISLIKED video with score: ${STATE.score} (threshold: ${CONFIG.dislikeThreshold})`);
       
       STATE.autoFeedbackConfirmationTimer = setTimeout(() => {
         confirmAutoFeedback();
       }, CONFIG.autoFeedbackConfirmationTime);
+      setTimeout(() => scrollToNextVideo(), 300);
     }
   } catch (error) {
     console.error('[ShortsAI] Error in checkAutoFeedback:', error);
