@@ -1,13 +1,18 @@
+from typing import List, Optional
+import webbrowser
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from typing import Optional
+from pydantic import BaseModel, Field, field_validator
 import uvicorn
+
+from data_logger import DataLogger
 from model import ShortsAIModel
 
-app = FastAPI(title="YouTube Shorts AI Personalizer", version="1.0.0")
+GITHUB_ISSUE_URL = "https://github.com/Owexiii13/YouTube-Shorts-Algorithm-scroller/issues/new?template=data_submission.md"
 
-# Enable CORS for all origins (for development)
+app = FastAPI(title="YouTube Shorts AI Personalizer", version="2.0.0")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -16,8 +21,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize the model
 model = ShortsAIModel()
+logger = DataLogger(".")
+
 
 class EventRequest(BaseModel):
     video_id: str
@@ -29,6 +35,7 @@ class EventRequest(BaseModel):
     watched_percent: float = 0.0
     mood: str = "Neutral"
 
+
 class PredictionRequest(BaseModel):
     video_id: str
     channel_id: str
@@ -36,9 +43,44 @@ class PredictionRequest(BaseModel):
     description: str = ""
     captions: str = ""
 
+
+class LogVideoRequest(BaseModel):
+    title: str = ""
+    description: str = ""
+    channel: str = ""
+    tags: List[str] = Field(default_factory=list)
+    category: Optional[str] = None
+    subtitles_snippet: Optional[str] = None
+    duration_seconds: int = Field(default=0, ge=0)
+    watch_percentage: float = Field(default=0.0, ge=0.0, le=1.0)
+    user_action: str = "neutral"
+    algorithm_action: str = "none"
+
+    @field_validator("user_action")
+    @classmethod
+    def validate_user_action(cls, value: str) -> str:
+        allowed = {"liked", "disliked", "neutral"}
+        if value not in allowed:
+            raise ValueError(f"user_action must be one of: {sorted(allowed)}")
+        return value
+
+    @field_validator("algorithm_action")
+    @classmethod
+    def validate_algorithm_action(cls, value: str) -> str:
+        allowed = {"liked", "disliked", "scrolled", "none"}
+        if value not in allowed:
+            raise ValueError(f"algorithm_action must be one of: {sorted(allowed)}")
+        return value
+
+
+class SubmitChunkRequest(BaseModel):
+    chunk_file: str
+
+
 @app.get("/")
 async def root():
     return {"message": "YouTube Shorts AI Personalizer API", "status": "running"}
+
 
 @app.post("/event")
 async def process_event(request: EventRequest):
@@ -48,49 +90,86 @@ async def process_event(request: EventRequest):
             channel_id=request.channel_id,
             event_type=request.event_type,
             watched_percent=request.watched_percent,
-            mood=request.mood
+            mood=request.mood,
         )
         return {"status": "success", "corrections_made": result.get("corrections_made", 0)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.post("/next")
 async def get_prediction(request: PredictionRequest):
     try:
-        result = model.predict_score(
+        return model.predict_score(
             video_id=request.video_id,
             channel_id=request.channel_id,
             title=request.title,
             description=request.description,
-            captions=request.captions
+            captions=request.captions,
         )
-        return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/log_video")
+async def log_video(request: LogVideoRequest):
+    try:
+        result = logger.log_video(request.model_dump())
+        return {
+            "status": "success",
+            "chunk_file": result.chunk_file,
+            "chunk_count": result.chunk_count,
+            "completed_chunk": result.completed_chunk,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/chunk_status")
+async def chunk_status():
+    try:
+        return logger.chunk_status()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/submit_chunk")
+async def submit_chunk(request: SubmitChunkRequest):
+    try:
+        rename_result = logger.mark_uploaded(request.chunk_file)
+        webbrowser.open(GITHUB_ISSUE_URL)
+        return {"status": "success", **rename_result, "issue_url": GITHUB_ISSUE_URL}
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Chunk file not found")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/channel_status")
 async def get_channel_status(channel_id: str):
     try:
-        result = model.get_channel_status(channel_id)
-        return result
+        return model.get_channel_status(channel_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/buffer_size")
 async def get_buffer_size():
     try:
-        buffer_size = model.get_buffer_size()
-        return {"buffer_size": buffer_size}
+        return {"buffer_size": model.get_buffer_size()}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/mood")
 async def get_current_mood():
     try:
-        current_mood = model.get_current_mood()
-        return {"current_mood": current_mood}
+        return {"current_mood": model.get_current_mood()}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/mood")
 async def set_mood(mood: str):
@@ -100,16 +179,17 @@ async def set_mood(mood: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.get("/mood/suggest")
 async def suggest_mood():
     try:
-        suggestion = model.suggest_mood_change()
-        return {"suggested_mood": suggestion}
+        return {"suggested_mood": model.suggest_mood_change()}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 if __name__ == "__main__":
     print("Starting YouTube Shorts AI Personalizer backend...")
-    print("Server will be available at: http://localhost:8000" )
-    print("API documentation at: http://localhost:8000/docs" )
+    print("Server will be available at: http://localhost:8000")
+    print("API documentation at: http://localhost:8000/docs")
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)

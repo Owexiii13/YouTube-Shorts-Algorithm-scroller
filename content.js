@@ -29,13 +29,15 @@ const CONFIG = {
   autoFeedbackConfirmationTime: 30000, // 30 seconds to undo auto-feedback before AI learns from it
   longFormClickPreventionDelay: 300, // Prevent accidental clicks for 300ms after page load
   userIntentDetectionTime: 5000, // 5 seconds to detect user intent to stay on video
-  userIntentScrollBackThreshold: 2 // Number of scroll-backs to trigger intent detection
+  userIntentScrollBackThreshold: 2, // Number of scroll-backs to trigger intent detection
+  chunkStatusPollInterval: 15000
 };
 
 // State
 let STATE = {
   currentVideoId: null,
   currentChannelId: null,
+  currentChannelName: null,
   currentTitle: null,
   currentDescription: null,
   currentCaptions: null,
@@ -68,6 +70,7 @@ let STATE = {
   videoChangeDetected: false,
   scrollAttempts: 0,
   lastScrollAttempt: 0,
+  lastScrollY: 0,
   scrollMethods: ['keydown', 'click', 'scroll', 'swipe', 'api'],
   currentScrollMethod: 0,
   videoCompletionDetectionMethods: ['ended', 'percent', 'stalled', 'timeupdate'],
@@ -86,7 +89,6 @@ let STATE = {
   lastAutoScrolledVideoId: null,
   currentMood: 'Neutral',
   userHasGivenFeedback: false, // Track if user has manually given feedback
-  aiActionBlocked: false, // Block AI actions when user has taken control
   completionCheckInterval: null, // Interval for checking completion
   autoFeedbackConfirmationTimer: null, // Timer for confirming auto-feedback
   pageLoadTime: Date.now(), // Track when page loaded for click prevention
@@ -94,14 +96,14 @@ let STATE = {
   lastPercentageValue: 0, // Track last percentage value
   
   // NEW: User intent detection
-  userIntentToStay: false, // Whether user has shown intent to stay on current video
-  videoReturnCount: 0, // How many times user has returned to this video
-  lastScrollDirection: null, // 'up' or 'down'
-  videoStayTimer: null, // Timer to detect if user stays on video
-  userIntentDetected: false, // Whether we've detected user intent for current video
-  lastVideoInHistory: [], // Track last few videos to detect returns
-  scrollBackCount: 0, // Count of consecutive scroll-backs to same video
-  userOverrideActive: false // Whether user has overridden AI for current video
+  currentUserAction: "neutral",
+  lastAlgorithmAction: "none",
+  loggedVideoIds: new Set(),
+  dataSubmitPopup: null,
+  pendingChunkFile: null,
+  lastVideoInHistory: [],
+  autoActionInProgress: false,
+  autoActionType: null
 };
 
 console.log("[ShortsAI] Content script loading (User Intent Detection Version)...");
@@ -150,11 +152,14 @@ function initialize() {
       const likeButton = event.target.closest('yt-icon-button[aria-label*="like"], button[aria-label*="like"]');
       const dislikeButton = event.target.closest('yt-icon-button[aria-label*="dislike"], button[aria-label*="dislike"]');
 
+      if (STATE.autoActionInProgress && (likeButton || dislikeButton)) {
+        console.log('[ShortsAI] Ignoring auto-generated feedback click event');
+        return;
+      }
+
       if (likeButton && STATE.currentVideoId) {
-        console.log("[ShortsAI] Manual like action detected - USER INTENT TO STAY");
-        handleUserIntentToStay("manual_like");
+        console.log("[ShortsAI] Manual like action detected");
         STATE.userHasGivenFeedback = true;
-        STATE.aiActionBlocked = true;
         
         if (STATE.autoFeedbackConfirmationTimer) {
           clearTimeout(STATE.autoFeedbackConfirmationTimer);
@@ -175,7 +180,9 @@ function initialize() {
           
           if (isNowLiked) {
             console.log("[ShortsAI] Video manually liked by user - POSITIVE FEEDBACK");
+            STATE.currentUserAction = "liked";
             sendEvent("user_like", 12);
+            logCurrentVideoForTraining("manual_like");
           } else {
             console.log("[ShortsAI] User removed like");
             sendEvent("user_unlike", 0);
@@ -183,9 +190,8 @@ function initialize() {
         }, 300);
         
       } else if (dislikeButton && STATE.currentVideoId) {
-        console.log("[ShortsAI] Manual dislike action detected - BLOCKING ALL AI ACTIONS");
+        console.log("[ShortsAI] Manual dislike action detected");
         STATE.userHasGivenFeedback = true;
-        STATE.aiActionBlocked = true;
         
         if (STATE.autoFeedbackConfirmationTimer) {
           clearTimeout(STATE.autoFeedbackConfirmationTimer);
@@ -206,7 +212,10 @@ function initialize() {
           
           if (isNowDisliked) {
             console.log("[ShortsAI] Video manually disliked by user - NEGATIVE FEEDBACK");
+            STATE.currentUserAction = "disliked";
             sendEvent("user_dislike", -12);
+            logCurrentVideoForTraining("manual_dislike");
+            setTimeout(() => scrollToNextVideo(), 250);
           } else {
             console.log("[ShortsAI] User removed dislike");
             sendEvent("user_undislike", 0);
@@ -232,6 +241,8 @@ function initialize() {
     setInterval(updateWatchedPercent, CONFIG.watchedPercentUpdateInterval);
     
     fetchBufferSize();
+    createDataSubmitPopup();
+    setInterval(checkChunkStatus, CONFIG.chunkStatusPollInterval);
 
     console.log("[ShortsAI] Initialization complete. Monitoring DOM for changes.");
   } catch (error) {
@@ -243,112 +254,11 @@ function initialize() {
 function handleScrollEvent(event) {
   try {
     const currentScrollY = window.scrollY;
-    const previousScrollY = STATE.lastScrollY || 0;
-    
-    // Determine scroll direction
-    if (currentScrollY > previousScrollY) {
-      STATE.lastScrollDirection = 'down';
-    } else if (currentScrollY < previousScrollY) {
-      STATE.lastScrollDirection = 'up';
-      
-      // User scrolled up - check if they're returning to a video
-      checkForVideoReturn();
-    }
-    
+
+    // Keep last position for potential future heuristics
     STATE.lastScrollY = currentScrollY;
-    
-    // Handle manual scroll (existing functionality)
-    if (STATE.currentVideoId && !STATE.videoCompleted) {
-      console.log('[ShortsAI] Manual scroll detected');
-      sendEvent('manual_skip', STATE.watchedPercent);
-    }
   } catch (error) {
     console.error('[ShortsAI] Error in handleScrollEvent:', error);
-  }
-}
-
-// NEW: Check if user is returning to a previous video
-function checkForVideoReturn() {
-  try {
-    if (!STATE.currentVideoId) return;
-    
-    // Check if current video was in recent history (user returned to it)
-    const wasInHistory = STATE.lastVideoInHistory.includes(STATE.currentVideoId);
-    
-    if (wasInHistory) {
-      STATE.scrollBackCount++;
-      console.log(`[ShortsAI] User returned to video ${STATE.currentVideoId} (return #${STATE.scrollBackCount})`);
-      
-      // If user has returned multiple times, they clearly want to watch this
-      if (STATE.scrollBackCount >= CONFIG.userIntentScrollBackThreshold) {
-        console.log("[ShortsAI] 🎯 USER INTENT DETECTED: Multiple returns to same video!");
-        handleUserIntentToStay("multiple_returns");
-      } else {
-        // Start timer to see if they stay
-        startUserIntentTimer();
-      }
-    }
-  } catch (error) {
-    console.error('[ShortsAI] Error in checkForVideoReturn:', error);
-  }
-}
-
-// NEW: Start timer to detect if user stays on video
-function startUserIntentTimer() {
-  try {
-    // Clear existing timer
-    if (STATE.videoStayTimer) {
-      clearTimeout(STATE.videoStayTimer);
-    }
-    
-    console.log(`[ShortsAI] Starting user intent timer (${CONFIG.userIntentDetectionTime/1000}s)`);
-    
-    STATE.videoStayTimer = setTimeout(() => {
-      if (STATE.currentVideoId && !STATE.userIntentDetected) {
-        console.log("[ShortsAI] 🎯 USER INTENT DETECTED: Stayed on video for 5+ seconds!");
-        handleUserIntentToStay("stayed_on_video");
-      }
-    }, CONFIG.userIntentDetectionTime);
-  } catch (error) {
-    console.error('[ShortsAI] Error in startUserIntentTimer:', error);
-  }
-}
-
-// NEW: Handle when user shows intent to stay on current video
-function handleUserIntentToStay(reason) {
-  try {
-    if (STATE.userIntentDetected) return; // Already detected for this video
-    
-    console.log(`[ShortsAI] 🎯 USER INTENT TO STAY DETECTED: ${reason}`);
-    console.log("[ShortsAI] *SLAPS ALGORITHM* User wants to watch this video!");
-    
-    STATE.userIntentToStay = true;
-    STATE.userIntentDetected = true;
-    STATE.userOverrideActive = true;
-    STATE.aiActionBlocked = true; // Block all AI actions
-    
-    // Clear any pending auto-scroll or auto-feedback
-    if (STATE.forceScrollTimer) {
-      clearTimeout(STATE.forceScrollTimer);
-      STATE.forceScrollTimer = null;
-      console.log("[ShortsAI] Cancelled force scroll timer - user wants to stay");
-    }
-    
-    if (STATE.autoFeedbackConfirmationTimer) {
-      clearTimeout(STATE.autoFeedbackConfirmationTimer);
-      STATE.autoFeedbackConfirmationTimer = null;
-      console.log("[ShortsAI] Cancelled auto-feedback timer - user override active");
-    }
-    
-    // Send strong positive signal to AI
-    sendEvent("user_intent_to_stay", 15); // Strong positive signal
-    
-    // Update status overlay
-    updateStatusOverlay();
-    
-    console.log("[ShortsAI] AI actions blocked - user is in control of this video");
-  } catch (error) {
-    console.error('[ShortsAI] Error in handleUserIntentToStay:', error);
   }
 }
 
@@ -385,6 +295,10 @@ function detectCurrentVideo() {
     
     if (videoId !== STATE.currentVideoId) {
       console.log(`[ShortsAI] Video changed: ${videoId}`);
+
+      if (STATE.currentVideoId) {
+        logCurrentVideoForTraining("video_change");
+      }
       
       // NEW: Add previous video to history
       if (STATE.currentVideoId) {
@@ -410,14 +324,11 @@ function detectCurrentVideo() {
         clearTimeout(STATE.autoFeedbackConfirmationTimer);
         STATE.autoFeedbackConfirmationTimer = null;
       }
-      if (STATE.videoStayTimer) {
-        clearTimeout(STATE.videoStayTimer);
-        STATE.videoStayTimer = null;
-      }
       
       // Reset state for new video
       STATE.currentVideoId = videoId;
       STATE.currentChannelId = null;
+      STATE.currentChannelName = null;
       STATE.currentTitle = null;
       STATE.currentDescription = null;
       STATE.currentCaptions = null;
@@ -442,15 +353,12 @@ function detectCurrentVideo() {
       STATE.badVideoCount = 0;
       STATE.lastBadVideoTimestamp = 0;
       STATE.userHasGivenFeedback = false; // Reset for new video
-      STATE.aiActionBlocked = false; // Reset for new video
       STATE.stuckPercentageCount = 0; // Reset stuck counter
       STATE.lastPercentageValue = 0; // Reset last percentage
       
       // NEW: Reset user intent detection for new video
-      STATE.userIntentToStay = false;
-      STATE.userIntentDetected = false;
-      STATE.scrollBackCount = 0;
-      STATE.userOverrideActive = false;
+      STATE.currentUserAction = "neutral";
+      STATE.lastAlgorithmAction = "none";
       
       findVideoElement();
       setTimeout(() => extractMetadata(), 500);
@@ -465,14 +373,10 @@ function detectCurrentVideo() {
       if (CONFIG.forceScrollAfterSeconds > 0) {
         STATE.forceScrollTimer = setTimeout(() => {
           if (!STATE.videoCompleted && 
-              !STATE.userIntentToStay && 
-              !STATE.userOverrideActive && 
               STATE.currentVideoId === videoId) {
             console.log(`[ShortsAI] Force scrolling after ${CONFIG.forceScrollAfterSeconds} seconds`);
             STATE.lastAutoScrollTrigger = 'force_timer';
             scrollToNextVideo();
-          } else if (STATE.userOverrideActive) {
-            console.log("[ShortsAI] Force scroll cancelled - user override active");
           }
         }, CONFIG.forceScrollAfterSeconds * 1000);
       }
@@ -556,12 +460,13 @@ function handleVideoCompletion(method) {
     }
     
     sendEvent('completed', STATE.watchedPercent);
+    if (STATE.currentUserAction === 'neutral') {
+      logCurrentVideoForTraining('completed');
+    }
     
     // NEW: Only auto-scroll if user hasn't shown intent to stay
     if (STATE.autoScrollEnabled && 
-        CONFIG.autoScrollOnCompletion && 
-        !STATE.userIntentToStay && 
-        !STATE.userOverrideActive) {
+        CONFIG.autoScrollOnCompletion) {
       console.log("[ShortsAI] GUARANTEED AUTO-SCROLL: Video completed, scrolling to next");
       STATE.lastAutoScrollTrigger = `completion_${method}`;
       STATE.lastAutoScrolledVideoId = STATE.currentVideoId;
@@ -570,8 +475,6 @@ function handleVideoCompletion(method) {
       setTimeout(() => scrollToNextVideo(), 800);
       setTimeout(() => scrollToNextVideo(), 1500);
       setTimeout(() => scrollToNextVideo(), 2500);
-    } else if (STATE.userOverrideActive) {
-      console.log("[ShortsAI] Auto-scroll cancelled - user override active");
     }
   } catch (error) {
     console.error('[ShortsAI] Error in handleVideoCompletion:', error);
@@ -602,9 +505,6 @@ function checkVideoState() {
     if (STATE.autoFeedbackEnabled && 
         !STATE.pendingAutoFeedback && 
         !STATE.userHasGivenFeedback &&
-        !STATE.aiActionBlocked &&
-        !STATE.userIntentToStay &&
-        !STATE.userOverrideActive &&
         STATE.score !== 0 && 
         STATE.watchedPercent >= CONFIG.feedbackWatchThreshold) {
       checkAutoFeedback();
@@ -711,19 +611,19 @@ function updateWatchedPercent() {
         return;
       }
 
-      if (newPercent < STATE.lastValidWatchedPercent - 20 && STATE.lastValidWatchedPercent > 10) {
-        console.log(`[ShortsAI] Watched percent glitch detected (dropped from ${STATE.lastValidWatchedPercent.toFixed(1)}% to ${newPercent.toFixed(1)}%). Using max: ${STATE.maxWatchedPercent.toFixed(1)}%`);
-        STATE.watchedPercent = STATE.maxWatchedPercent;
-      } else if (newPercent < 5 && STATE.maxWatchedPercent > 50) {
-        console.log(`[ShortsAI] Video restart detected. Using max watched: ${STATE.maxWatchedPercent.toFixed(1)}%`);
-        STATE.watchedPercent = STATE.maxWatchedPercent;
+      const timeRemaining = STATE.videoElement.duration - STATE.videoElement.currentTime;
+      if (STATE.videoElement.ended || (timeRemaining <= 0.4 && newPercent > 75)) {
+        STATE.watchedPercent = 100;
+        STATE.lastValidWatchedPercent = 100;
+      } else if (newPercent < STATE.lastValidWatchedPercent - 30 && STATE.lastValidWatchedPercent > 15) {
+        // Ignore abrupt loop/glitch drops but allow forward movement.
+        STATE.watchedPercent = Math.max(STATE.watchedPercent, STATE.lastValidWatchedPercent);
       } else {
-        STATE.watchedPercent = newPercent;
-        STATE.lastValidWatchedPercent = newPercent;
+        STATE.watchedPercent = Math.max(0, Math.min(100, newPercent));
+        STATE.lastValidWatchedPercent = STATE.watchedPercent;
       }
 
       STATE.maxWatchedPercent = Math.max(STATE.maxWatchedPercent, STATE.watchedPercent);
-
     } else {
       STATE.watchedPercent = 0;
       STATE.lastValidWatchedPercent = 0;
@@ -760,75 +660,76 @@ function extractMetadata(force = false) {
 
     let channelFound = false;
     let detectedChannelId = null;
+    let detectedChannelName = null;
 
-    const channelElement = document.querySelector('a[href^="/channel/"], a[href^="/@"], ytd-channel-name a, #channel-name a, #owner-text a');
-    if (channelElement) {
-      const channelHref = channelElement.getAttribute('href');
-      if (channelHref && channelHref.startsWith('/channel/')) {
-        detectedChannelId = channelHref.split('/channel/')[1];
+    const channelSelectors = [
+      'ytd-reel-player-header-renderer #channel-name a',
+      'ytd-reel-player-header-renderer a[href^="/@"]',
+      'ytd-reel-player-header-renderer a[href^="/channel/"]',
+      'ytd-reel-video-renderer #channel-name a',
+      'ytd-reel-video-renderer a[href^="/@"]',
+      '#owner a[href^="/@"]',
+      '#owner a[href^="/channel/"]',
+      'a.yt-simple-endpoint[href^="/@"]',
+      'a.yt-simple-endpoint[href^="/channel/"]'
+    ];
+
+    for (const selector of channelSelectors) {
+      const el = document.querySelector(selector);
+      if (!el) continue;
+      const href = el.getAttribute('href') || '';
+      const txt = (el.textContent || '').trim();
+      if (txt) detectedChannelName = txt.replace(/^@/, '');
+      if (href.startsWith('/channel/')) {
+        detectedChannelId = href.split('/channel/')[1].split('?')[0];
         channelFound = true;
-      } else if (channelHref && channelHref.startsWith('/@')) {
-        detectedChannelId = channelHref.substring(2);
-        channelFound = true;
+        break;
       }
-      if (channelFound) console.log('[ShortsAI] Channel detected (Method 1):', detectedChannelId);
+      if (href.startsWith('/@')) {
+        detectedChannelId = href.substring(2).split('?')[0];
+        channelFound = true;
+        break;
+      }
     }
 
-    if (!channelFound && CONFIG.aggressiveChannelDetection) {
-      const channelNameElements = document.querySelectorAll('.ytd-channel-name, #channel-name, #text-container.ytd-channel-name, #owner-text a, #owner a');
-      for (const element of channelNameElements) {
-        if (element.textContent && element.textContent.trim()) {
-          detectedChannelId = element.textContent.trim();
+    if (!channelFound) {
+      const authorMeta = document.querySelector('meta[itemprop="author"], link[rel="author"]');
+      if (authorMeta) {
+        const content = authorMeta.getAttribute('content') || authorMeta.getAttribute('href') || '';
+        if (content) {
+          detectedChannelName = detectedChannelName || content.replace(/^@/, '').trim();
+          detectedChannelId = detectedChannelId || detectedChannelName;
           channelFound = true;
-          console.log('[ShortsAI] Channel detected (Method 2):', detectedChannelId);
-          break;
-        }
-      }
-    }
-
-    if (!channelFound && CONFIG.aggressiveChannelDetection) {
-      const authorLinks = document.querySelectorAll('a.yt-simple-endpoint, #author-text a, #channel-info a, #owner a');
-      for (const link of authorLinks) {
-        try {
-          if (link.href && (link.href.includes('/channel/') || link.href.includes('/@'))) {
-            const href = link.href;
-            if (href.includes('/channel/')) {
-              detectedChannelId = href.split('/channel/')[1].split('?')[0];
-              channelFound = true;
-            } else if (href.includes('/@')) {
-              detectedChannelId = href.split('/@')[1].split('?')[0];
-              channelFound = true;
-            }
-            if (channelFound) {
-              console.log('[ShortsAI] Channel detected (Method 3):', detectedChannelId);
-              break;
-            }
-          }
-        } catch (error) {
-          console.warn('[ShortsAI] Error processing author link:', error);
         }
       }
     }
 
     if (channelFound) {
       STATE.currentChannelId = detectedChannelId;
+      STATE.currentChannelName = detectedChannelName || detectedChannelId;
+      console.log('[ShortsAI] Channel detected:', STATE.currentChannelName || STATE.currentChannelId);
     }
 
-    const titleElement = document.querySelector('h1.ytd-watch-metadata, .title.ytd-video-primary-info-renderer, #title h1, .title');
+    const titleElement = document.querySelector('ytd-reel-player-header-renderer h2, h1.ytd-watch-metadata, #title h1, .title');
     if (titleElement && titleElement.textContent) {
       STATE.currentTitle = titleElement.textContent.trim();
-      console.log('[ShortsAI] Title detected:', STATE.currentTitle);
     }
 
-    const descriptionElement = document.querySelector('#description, .description, .content.ytd-video-secondary-info-renderer');
+    const descriptionElement = document.querySelector('#description, ytd-reel-player-header-renderer #description-text, .description, .content.ytd-video-secondary-info-renderer');
     if (descriptionElement && descriptionElement.textContent) {
       STATE.currentDescription = descriptionElement.textContent.trim();
-      console.log('[ShortsAI] Description detected (length):', STATE.currentDescription.length);
+    }
+
+    const captionsNodes = document.querySelectorAll('.ytp-caption-segment');
+    if (captionsNodes && captionsNodes.length) {
+      const joined = Array.from(captionsNodes).map((n) => (n.textContent || '').trim()).filter(Boolean).join(' ');
+      if (joined) {
+        STATE.currentCaptions = joined.slice(0, 300);
+      }
     }
 
     if (channelFound || STATE.currentTitle || STATE.currentDescription) {
       STATE.metadataExtracted = true;
-      console.log('[ShortsAI] Metadata extraction completed');
       updateStatusOverlay();
       return true;
     }
@@ -919,7 +820,7 @@ function updateStatusOverlay() {
 `;
     status += `Video: ${STATE.currentVideoId || 'None'}  
 `;
-    status += `Channel: ${STATE.currentChannelId || 'Detecting...'}  
+    status += `Channel: ${STATE.currentChannelName || STATE.currentChannelId || 'Detecting...'}  
 `;
     status += `Score: ${STATE.score}  
 `;
@@ -929,16 +830,6 @@ function updateStatusOverlay() {
 `;
     status += `Auto-feedback: ${STATE.autoFeedbackEnabled ? 'ON' : 'OFF'}`;
     
-    if (STATE.userHasGivenFeedback) {
-      status += `  
-<span style="color: #4CAF50;">User Control Active</span>`;
-    }
-    
-    // NEW: Show user intent status
-    if (STATE.userOverrideActive) {
-      status += `  
-<span style="color: #FF9800;">🎯 User Override Active</span>`;
-    }
 
     if (CONFIG.showBufferInOverlay) {
       status += `  
@@ -1068,13 +959,13 @@ function setupKeyboardShortcuts() {
         case 'l':
           if (event.ctrlKey) {
             event.preventDefault();
-            likeCurrentVideo();
+            likeCurrentVideo('auto');
           }
           break;
         case 'd':
           if (event.ctrlKey) {
             event.preventDefault();
-            dislikeCurrentVideo();
+            dislikeCurrentVideo('auto');
           }
           break;
         case 't':
@@ -1186,11 +1077,10 @@ function getPrediction() {
       
       // NEW: Only auto-skip if user hasn't shown intent to stay
       if (STATE.score <= CONFIG.autoSkipThreshold && 
-          STATE.autoScrollEnabled && 
-          !STATE.userIntentToStay && 
-          !STATE.userOverrideActive) {
+          STATE.autoScrollEnabled) {
         console.log('[ShortsAI] Auto-skipping video with low score:', STATE.score);
         STATE.lastAutoScrollTrigger = 'low_score';
+        STATE.lastAlgorithmAction = 'scrolled';
         STATE.lastAutoScrolledVideoId = STATE.currentVideoId;
         
         const delay = STATE.badVideoCount > 0 && 
@@ -1203,8 +1093,6 @@ function getPrediction() {
         setTimeout(() => {
           scrollToNextVideo();
         }, delay);
-      } else if (STATE.userOverrideActive) {
-        console.log('[ShortsAI] Auto-skip cancelled - user override active');
       }
     })
     .catch(error => {
@@ -1259,12 +1147,7 @@ function fetchBufferSize() {
 // NEW: Enhanced scroll function that respects user intent
 function scrollToNextVideo() {
   try {
-    // Don't scroll if user has shown intent to stay
-    if (STATE.userIntentToStay || STATE.userOverrideActive) {
-      console.log('[ShortsAI] Scroll blocked - user wants to stay on this video');
-      return;
-    }
-    
+
     const now = Date.now();
     if (now - STATE.lastScrollTime < CONFIG.minScrollInterval && !CONFIG.zeroDelayScroll) {
       console.log('[ShortsAI] Scroll rate limited');
@@ -1319,26 +1202,30 @@ function scrollToNextVideo() {
   }
 }
 
-function likeCurrentVideo() {
+function likeCurrentVideo(source = 'manual') {
   try {
     const likeButton = document.querySelector('yt-icon-button[aria-label*="like"], button[aria-label*="like"]');
     if (likeButton) {
       likeButton.click();
       console.log('[ShortsAI] Liked video');
-      sendEvent('like', STATE.watchedPercent);
+      if (source === 'manual') {
+        sendEvent('like', STATE.watchedPercent);
+      }
     }
   } catch (error) {
     console.error('[ShortsAI] Error liking video:', error);
   }
 }
 
-function dislikeCurrentVideo() {
+function dislikeCurrentVideo(source = 'manual') {
   try {
     const dislikeButton = document.querySelector('yt-icon-button[aria-label*="dislike"], button[aria-label*="dislike"]');
     if (dislikeButton) {
       dislikeButton.click();
       console.log('[ShortsAI] Disliked video');
-      sendEvent('dislike', STATE.watchedPercent);
+      if (source === 'manual') {
+        sendEvent('dislike', STATE.watchedPercent);
+      }
     }
   } catch (error) {
     console.error('[ShortsAI] Error disliking video:', error);
@@ -1349,10 +1236,7 @@ function dislikeCurrentVideo() {
 function checkAutoFeedback() {
   try {
     if (STATE.pendingAutoFeedback || 
-        STATE.userHasGivenFeedback || 
-        STATE.aiActionBlocked ||
-        STATE.userIntentToStay ||
-        STATE.userOverrideActive) {
+        STATE.userHasGivenFeedback) {
       return;
     }
 
@@ -1370,9 +1254,8 @@ function checkAutoFeedback() {
     );
     
     if (isAlreadyLiked || isAlreadyDisliked) {
-      console.log('[ShortsAI] Video already has manual feedback, blocking AI');
+      console.log('[ShortsAI] Video already has manual feedback, skipping auto-feedback for this video');
       STATE.userHasGivenFeedback = true;
-      STATE.aiActionBlocked = true;
       return;
     }
 
@@ -1381,7 +1264,11 @@ function checkAutoFeedback() {
       STATE.autoFeedbackType = 'like';
       STATE.autoFeedbackTimestamp = Date.now();
       STATE.autoFeedbackConfirmed = false;
-      likeCurrentVideo();
+      STATE.lastAlgorithmAction = "liked";
+      STATE.autoActionInProgress = true;
+      STATE.autoActionType = 'like';
+      likeCurrentVideo('auto');
+      setTimeout(() => { STATE.autoActionInProgress = false; STATE.autoActionType = null; }, 800);
       console.log(`[ShortsAI] AUTO-LIKED video with score: ${STATE.score} (threshold: ${CONFIG.likeThreshold})`);
       
       STATE.autoFeedbackConfirmationTimer = setTimeout(() => {
@@ -1393,12 +1280,17 @@ function checkAutoFeedback() {
       STATE.autoFeedbackType = 'dislike';
       STATE.autoFeedbackTimestamp = Date.now();
       STATE.autoFeedbackConfirmed = false;
-      dislikeCurrentVideo();
+      STATE.lastAlgorithmAction = "disliked";
+      STATE.autoActionInProgress = true;
+      STATE.autoActionType = 'dislike';
+      dislikeCurrentVideo('auto');
+      setTimeout(() => { STATE.autoActionInProgress = false; STATE.autoActionType = null; }, 800);
       console.log(`[ShortsAI] AUTO-DISLIKED video with score: ${STATE.score} (threshold: ${CONFIG.dislikeThreshold})`);
       
       STATE.autoFeedbackConfirmationTimer = setTimeout(() => {
         confirmAutoFeedback();
       }, CONFIG.autoFeedbackConfirmationTime);
+      setTimeout(() => scrollToNextVideo(), 300);
     }
   } catch (error) {
     console.error('[ShortsAI] Error in checkAutoFeedback:', error);
@@ -1414,6 +1306,138 @@ function handleManualScroll() {
   } catch (error) {
     console.error('[ShortsAI] Error in handleManualScroll:', error);
   }
+}
+
+
+function extractTagsFromMeta() {
+  const tags = [];
+  document.querySelectorAll('meta[property="og:video:tag"], meta[name="keywords"]').forEach((el) => {
+    const content = (el.getAttribute('content') || '').trim();
+    if (!content) return;
+    content.split(',').map(x => x.trim()).filter(Boolean).forEach((tag) => tags.push(tag));
+  });
+  return [...new Set(tags)].slice(0, 20);
+}
+
+function getTimeBucket() {
+  const hour = new Date().getHours();
+  if (hour >= 5 && hour < 12) return 'morning';
+  if (hour >= 12 && hour < 17) return 'afternoon';
+  if (hour >= 17 && hour < 22) return 'evening';
+  return 'night';
+}
+
+function logCurrentVideoForTraining(reason = 'unknown') {
+  try {
+    if (!STATE.currentVideoId || STATE.loggedVideoIds.has(STATE.currentVideoId)) return;
+
+    const durationSeconds = STATE.videoElement && Number.isFinite(STATE.videoElement.duration) ? Math.max(0, Math.round(STATE.videoElement.duration)) : 0;
+    const payload = {
+      title: STATE.currentTitle || '',
+      description: STATE.currentDescription || '',
+      channel: STATE.currentChannelName || STATE.currentChannelId || '',
+      tags: extractTagsFromMeta(),
+      category: null,
+      subtitles_snippet: STATE.currentCaptions ? String(STATE.currentCaptions).slice(0, 300) : null,
+      duration_seconds: durationSeconds,
+      watch_percentage: Math.max(0, Math.min(1, (STATE.maxWatchedPercent || STATE.watchedPercent || 0) / 100)),
+      user_action: STATE.currentUserAction || 'neutral',
+      algorithm_action: STATE.lastAlgorithmAction || 'none',
+      day_of_week: ((new Date().getDay() + 6) % 7),
+      time_of_day_bucket: getTimeBucket(),
+      reason
+    };
+
+    fetch(`${CONFIG.apiBaseUrl}/log_video`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        STATE.loggedVideoIds.add(STATE.currentVideoId);
+        if (data.completed_chunk) {
+          STATE.pendingChunkFile = data.completed_chunk;
+          showDataSubmitPopup(data.completed_chunk);
+        }
+      })
+      .catch((err) => console.error('[ShortsAI] Failed to log training video:', err));
+  } catch (error) {
+    console.error('[ShortsAI] Error in logCurrentVideoForTraining:', error);
+  }
+}
+
+function createDataSubmitPopup() {
+  if (STATE.dataSubmitPopup) return;
+  const popup = document.createElement('div');
+  popup.id = 'shorts-ai-submit-popup';
+  popup.style.cssText = `
+    position: fixed;
+    left: 20px;
+    bottom: 140px;
+    z-index: 99999;
+    width: 320px;
+    background: rgba(18, 18, 18, 0.95);
+    color: #fff;
+    border: 1px solid rgba(255,255,255,0.2);
+    border-radius: 10px;
+    padding: 10px;
+    display: none;
+    font-family: Arial, sans-serif;
+  `;
+  popup.innerHTML = `
+    <div style="font-weight:700;margin-bottom:6px;">Help improve the algorithm for everyone?</div>
+    <div style="font-size:12px;line-height:1.4;margin-bottom:10px;">Your watch data (titles, descriptions, likes/dislikes — no personal info) can be submitted to train a better shared model.</div>
+    <div style="display:flex;gap:8px;">
+      <button id="shorts-ai-dismiss" style="flex:1;padding:6px;border-radius:6px;border:1px solid #555;background:#2d2d2d;color:white;">Dismiss</button>
+      <button id="shorts-ai-submit" style="flex:1;padding:6px;border-radius:6px;border:1px solid #2e7d32;background:#2e7d32;color:white;">Submit</button>
+    </div>
+    <div id="shorts-ai-submit-file" style="margin-top:8px;font-size:11px;opacity:.8;"></div>
+  `;
+  document.body.appendChild(popup);
+
+  popup.querySelector('#shorts-ai-dismiss').addEventListener('click', () => {
+    popup.style.display = 'none';
+  });
+
+  popup.querySelector('#shorts-ai-submit').addEventListener('click', () => submitPendingChunk());
+
+  STATE.dataSubmitPopup = popup;
+}
+
+function showDataSubmitPopup(chunkFile) {
+  if (!STATE.dataSubmitPopup || !chunkFile) return;
+  STATE.pendingChunkFile = chunkFile;
+  const note = STATE.dataSubmitPopup.querySelector('#shorts-ai-submit-file');
+  if (note) note.textContent = `Attach file: ${chunkFile.replace('.json', 'Uploaded.json')} from your extension folder.`;
+  STATE.dataSubmitPopup.style.display = 'block';
+}
+
+function checkChunkStatus() {
+  fetch(`${CONFIG.apiBaseUrl}/chunk_status`)
+    .then((res) => res.json())
+    .then((data) => {
+      if (data.show_popup && data.chunk_file) {
+        showDataSubmitPopup(data.chunk_file);
+      }
+    })
+    .catch((err) => console.warn('[ShortsAI] chunk_status unavailable:', err));
+}
+
+function submitPendingChunk() {
+  if (!STATE.pendingChunkFile) return;
+  fetch(`${CONFIG.apiBaseUrl}/submit_chunk`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ chunk_file: STATE.pendingChunkFile })
+  })
+    .then((res) => res.json())
+    .then((data) => {
+      console.log('[ShortsAI] Chunk submitted:', data);
+      if (STATE.dataSubmitPopup) STATE.dataSubmitPopup.style.display = 'none';
+      STATE.pendingChunkFile = null;
+    })
+    .catch((err) => console.error('[ShortsAI] Failed to submit chunk:', err));
 }
 
 console.log("[ShortsAI] Content script loaded successfully (User Intent Detection Version)");
