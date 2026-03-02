@@ -70,6 +70,7 @@ let STATE = {
   videoChangeDetected: false,
   scrollAttempts: 0,
   lastScrollAttempt: 0,
+  lastScrollY: 0,
   scrollMethods: ['keydown', 'click', 'scroll', 'swipe', 'api'],
   currentScrollMethod: 0,
   videoCompletionDetectionMethods: ['ended', 'percent', 'stalled', 'timeupdate'],
@@ -88,7 +89,6 @@ let STATE = {
   lastAutoScrolledVideoId: null,
   currentMood: 'Neutral',
   userHasGivenFeedback: false, // Track if user has manually given feedback
-  aiActionBlocked: false, // Block AI actions when user has taken control
   completionCheckInterval: null, // Interval for checking completion
   autoFeedbackConfirmationTimer: null, // Timer for confirming auto-feedback
   pageLoadTime: Date.now(), // Track when page loaded for click prevention
@@ -96,19 +96,12 @@ let STATE = {
   lastPercentageValue: 0, // Track last percentage value
   
   // NEW: User intent detection
-  userIntentToStay: false, // Whether user has shown intent to stay on current video
-  videoReturnCount: 0, // How many times user has returned to this video
-  lastScrollDirection: null, // 'up' or 'down'
-  videoStayTimer: null, // Timer to detect if user stays on video
-  userIntentDetected: false, // Whether we've detected user intent for current video
-  lastVideoInHistory: [], // Track last few videos to detect returns
-  scrollBackCount: 0, // Count of consecutive scroll-backs to same video
-  userOverrideActive: false, // Whether user has overridden AI for current video
   currentUserAction: "neutral",
   lastAlgorithmAction: "none",
   loggedVideoIds: new Set(),
   dataSubmitPopup: null,
-  pendingChunkFile: null
+  pendingChunkFile: null,
+  lastVideoInHistory: []
 };
 
 console.log("[ShortsAI] Content script loading (User Intent Detection Version)...");
@@ -158,10 +151,8 @@ function initialize() {
       const dislikeButton = event.target.closest('yt-icon-button[aria-label*="dislike"], button[aria-label*="dislike"]');
 
       if (likeButton && STATE.currentVideoId) {
-        console.log("[ShortsAI] Manual like action detected - USER INTENT TO STAY");
-        handleUserIntentToStay("manual_like");
+        console.log("[ShortsAI] Manual like action detected");
         STATE.userHasGivenFeedback = true;
-        STATE.aiActionBlocked = true;
         
         if (STATE.autoFeedbackConfirmationTimer) {
           clearTimeout(STATE.autoFeedbackConfirmationTimer);
@@ -192,9 +183,8 @@ function initialize() {
         }, 300);
         
       } else if (dislikeButton && STATE.currentVideoId) {
-        console.log("[ShortsAI] Manual dislike action detected - BLOCKING ALL AI ACTIONS");
+        console.log("[ShortsAI] Manual dislike action detected");
         STATE.userHasGivenFeedback = true;
-        STATE.aiActionBlocked = true;
         
         if (STATE.autoFeedbackConfirmationTimer) {
           clearTimeout(STATE.autoFeedbackConfirmationTimer);
@@ -256,112 +246,11 @@ function initialize() {
 function handleScrollEvent(event) {
   try {
     const currentScrollY = window.scrollY;
-    const previousScrollY = STATE.lastScrollY || 0;
-    
-    // Determine scroll direction
-    if (currentScrollY > previousScrollY) {
-      STATE.lastScrollDirection = 'down';
-    } else if (currentScrollY < previousScrollY) {
-      STATE.lastScrollDirection = 'up';
-      
-      // User scrolled up - check if they're returning to a video
-      checkForVideoReturn();
-    }
-    
+
+    // Keep last position for potential future heuristics
     STATE.lastScrollY = currentScrollY;
-    
-    // Handle manual scroll (existing functionality)
-    if (STATE.currentVideoId && !STATE.videoCompleted) {
-      console.log('[ShortsAI] Manual scroll detected');
-      sendEvent('manual_skip', STATE.watchedPercent);
-    }
   } catch (error) {
     console.error('[ShortsAI] Error in handleScrollEvent:', error);
-  }
-}
-
-// NEW: Check if user is returning to a previous video
-function checkForVideoReturn() {
-  try {
-    if (!STATE.currentVideoId) return;
-    
-    // Check if current video was in recent history (user returned to it)
-    const wasInHistory = STATE.lastVideoInHistory.includes(STATE.currentVideoId);
-    
-    if (wasInHistory) {
-      STATE.scrollBackCount++;
-      console.log(`[ShortsAI] User returned to video ${STATE.currentVideoId} (return #${STATE.scrollBackCount})`);
-      
-      // If user has returned multiple times, they clearly want to watch this
-      if (STATE.scrollBackCount >= CONFIG.userIntentScrollBackThreshold) {
-        console.log("[ShortsAI] 🎯 USER INTENT DETECTED: Multiple returns to same video!");
-        handleUserIntentToStay("multiple_returns");
-      } else {
-        // Start timer to see if they stay
-        startUserIntentTimer();
-      }
-    }
-  } catch (error) {
-    console.error('[ShortsAI] Error in checkForVideoReturn:', error);
-  }
-}
-
-// NEW: Start timer to detect if user stays on video
-function startUserIntentTimer() {
-  try {
-    // Clear existing timer
-    if (STATE.videoStayTimer) {
-      clearTimeout(STATE.videoStayTimer);
-    }
-    
-    console.log(`[ShortsAI] Starting user intent timer (${CONFIG.userIntentDetectionTime/1000}s)`);
-    
-    STATE.videoStayTimer = setTimeout(() => {
-      if (STATE.currentVideoId && !STATE.userIntentDetected) {
-        console.log("[ShortsAI] 🎯 USER INTENT DETECTED: Stayed on video for 5+ seconds!");
-        handleUserIntentToStay("stayed_on_video");
-      }
-    }, CONFIG.userIntentDetectionTime);
-  } catch (error) {
-    console.error('[ShortsAI] Error in startUserIntentTimer:', error);
-  }
-}
-
-// NEW: Handle when user shows intent to stay on current video
-function handleUserIntentToStay(reason) {
-  try {
-    if (STATE.userIntentDetected) return; // Already detected for this video
-    
-    console.log(`[ShortsAI] 🎯 USER INTENT TO STAY DETECTED: ${reason}`);
-    console.log("[ShortsAI] *SLAPS ALGORITHM* User wants to watch this video!");
-    
-    STATE.userIntentToStay = true;
-    STATE.userIntentDetected = true;
-    STATE.userOverrideActive = true;
-    STATE.aiActionBlocked = true; // Block all AI actions
-    
-    // Clear any pending auto-scroll or auto-feedback
-    if (STATE.forceScrollTimer) {
-      clearTimeout(STATE.forceScrollTimer);
-      STATE.forceScrollTimer = null;
-      console.log("[ShortsAI] Cancelled force scroll timer - user wants to stay");
-    }
-    
-    if (STATE.autoFeedbackConfirmationTimer) {
-      clearTimeout(STATE.autoFeedbackConfirmationTimer);
-      STATE.autoFeedbackConfirmationTimer = null;
-      console.log("[ShortsAI] Cancelled auto-feedback timer - user override active");
-    }
-    
-    // Send strong positive signal to AI
-    sendEvent("user_intent_to_stay", 15); // Strong positive signal
-    
-    // Update status overlay
-    updateStatusOverlay();
-    
-    console.log("[ShortsAI] AI actions blocked - user is in control of this video");
-  } catch (error) {
-    console.error('[ShortsAI] Error in handleUserIntentToStay:', error);
   }
 }
 
@@ -427,10 +316,6 @@ function detectCurrentVideo() {
         clearTimeout(STATE.autoFeedbackConfirmationTimer);
         STATE.autoFeedbackConfirmationTimer = null;
       }
-      if (STATE.videoStayTimer) {
-        clearTimeout(STATE.videoStayTimer);
-        STATE.videoStayTimer = null;
-      }
       
       // Reset state for new video
       STATE.currentVideoId = videoId;
@@ -460,15 +345,10 @@ function detectCurrentVideo() {
       STATE.badVideoCount = 0;
       STATE.lastBadVideoTimestamp = 0;
       STATE.userHasGivenFeedback = false; // Reset for new video
-      STATE.aiActionBlocked = false; // Reset for new video
       STATE.stuckPercentageCount = 0; // Reset stuck counter
       STATE.lastPercentageValue = 0; // Reset last percentage
       
       // NEW: Reset user intent detection for new video
-      STATE.userIntentToStay = false;
-      STATE.userIntentDetected = false;
-      STATE.scrollBackCount = 0;
-      STATE.userOverrideActive = false;
       STATE.currentUserAction = "neutral";
       STATE.lastAlgorithmAction = "none";
       
@@ -485,14 +365,10 @@ function detectCurrentVideo() {
       if (CONFIG.forceScrollAfterSeconds > 0) {
         STATE.forceScrollTimer = setTimeout(() => {
           if (!STATE.videoCompleted && 
-              !STATE.userIntentToStay && 
-              !STATE.userOverrideActive && 
               STATE.currentVideoId === videoId) {
             console.log(`[ShortsAI] Force scrolling after ${CONFIG.forceScrollAfterSeconds} seconds`);
             STATE.lastAutoScrollTrigger = 'force_timer';
             scrollToNextVideo();
-          } else if (STATE.userOverrideActive) {
-            console.log("[ShortsAI] Force scroll cancelled - user override active");
           }
         }, CONFIG.forceScrollAfterSeconds * 1000);
       }
@@ -582,9 +458,7 @@ function handleVideoCompletion(method) {
     
     // NEW: Only auto-scroll if user hasn't shown intent to stay
     if (STATE.autoScrollEnabled && 
-        CONFIG.autoScrollOnCompletion && 
-        !STATE.userIntentToStay && 
-        !STATE.userOverrideActive) {
+        CONFIG.autoScrollOnCompletion) {
       console.log("[ShortsAI] GUARANTEED AUTO-SCROLL: Video completed, scrolling to next");
       STATE.lastAutoScrollTrigger = `completion_${method}`;
       STATE.lastAutoScrolledVideoId = STATE.currentVideoId;
@@ -593,8 +467,6 @@ function handleVideoCompletion(method) {
       setTimeout(() => scrollToNextVideo(), 800);
       setTimeout(() => scrollToNextVideo(), 1500);
       setTimeout(() => scrollToNextVideo(), 2500);
-    } else if (STATE.userOverrideActive) {
-      console.log("[ShortsAI] Auto-scroll cancelled - user override active");
     }
   } catch (error) {
     console.error('[ShortsAI] Error in handleVideoCompletion:', error);
@@ -625,9 +497,6 @@ function checkVideoState() {
     if (STATE.autoFeedbackEnabled && 
         !STATE.pendingAutoFeedback && 
         !STATE.userHasGivenFeedback &&
-        !STATE.aiActionBlocked &&
-        !STATE.userIntentToStay &&
-        !STATE.userOverrideActive &&
         STATE.score !== 0 && 
         STATE.watchedPercent >= CONFIG.feedbackWatchThreshold) {
       checkAutoFeedback();
@@ -785,7 +654,7 @@ function extractMetadata(force = false) {
     let detectedChannelId = null;
     let detectedChannelName = null;
 
-    const channelElement = document.querySelector('a[href^="/channel/"], a[href^="/@"], ytd-channel-name a, #channel-name a, #owner-text a');
+    const channelElement = document.querySelector('ytd-reel-player-header-renderer #channel-name a, ytd-reel-player-header-renderer a[href^="/@"], ytd-reel-player-header-renderer a[href^="/channel/"]');
     if (channelElement) {
       const channelHref = channelElement.getAttribute('href');
       const channelText = (channelElement.textContent || '').trim();
@@ -803,7 +672,7 @@ function extractMetadata(force = false) {
     }
 
     if (!channelFound && CONFIG.aggressiveChannelDetection) {
-      const channelNameElements = document.querySelectorAll('.ytd-channel-name, #channel-name, #text-container.ytd-channel-name, #owner-text a, #owner a');
+      const channelNameElements = document.querySelectorAll('ytd-reel-player-header-renderer #channel-name a, ytd-reel-player-header-renderer #owner-text a');
       for (const element of channelNameElements) {
         if (element.textContent && element.textContent.trim()) {
           const text = element.textContent.trim();
@@ -817,7 +686,7 @@ function extractMetadata(force = false) {
     }
 
     if (!channelFound && CONFIG.aggressiveChannelDetection) {
-      const authorLinks = document.querySelectorAll('a.yt-simple-endpoint, #author-text a, #channel-info a, #owner a');
+      const authorLinks = document.querySelectorAll('ytd-reel-player-header-renderer a[href^="/@"], ytd-reel-player-header-renderer a[href^="/channel/"]');
       for (const link of authorLinks) {
         try {
           if (link.href && (link.href.includes('/channel/') || link.href.includes('/@'))) {
@@ -972,16 +841,6 @@ function updateStatusOverlay() {
 `;
     status += `Auto-feedback: ${STATE.autoFeedbackEnabled ? 'ON' : 'OFF'}`;
     
-    if (STATE.userHasGivenFeedback) {
-      status += `  
-<span style="color: #4CAF50;">User Control Active</span>`;
-    }
-    
-    // NEW: Show user intent status
-    if (STATE.userOverrideActive) {
-      status += `  
-<span style="color: #FF9800;">🎯 User Override Active</span>`;
-    }
 
     if (CONFIG.showBufferInOverlay) {
       status += `  
@@ -1229,9 +1088,7 @@ function getPrediction() {
       
       // NEW: Only auto-skip if user hasn't shown intent to stay
       if (STATE.score <= CONFIG.autoSkipThreshold && 
-          STATE.autoScrollEnabled && 
-          !STATE.userIntentToStay && 
-          !STATE.userOverrideActive) {
+          STATE.autoScrollEnabled) {
         console.log('[ShortsAI] Auto-skipping video with low score:', STATE.score);
         STATE.lastAutoScrollTrigger = 'low_score';
         STATE.lastAlgorithmAction = 'scrolled';
@@ -1247,8 +1104,6 @@ function getPrediction() {
         setTimeout(() => {
           scrollToNextVideo();
         }, delay);
-      } else if (STATE.userOverrideActive) {
-        console.log('[ShortsAI] Auto-skip cancelled - user override active');
       }
     })
     .catch(error => {
@@ -1303,12 +1158,7 @@ function fetchBufferSize() {
 // NEW: Enhanced scroll function that respects user intent
 function scrollToNextVideo() {
   try {
-    // Don't scroll if user has shown intent to stay
-    if (STATE.userIntentToStay || STATE.userOverrideActive) {
-      console.log('[ShortsAI] Scroll blocked - user wants to stay on this video');
-      return;
-    }
-    
+
     const now = Date.now();
     if (now - STATE.lastScrollTime < CONFIG.minScrollInterval && !CONFIG.zeroDelayScroll) {
       console.log('[ShortsAI] Scroll rate limited');
@@ -1393,10 +1243,7 @@ function dislikeCurrentVideo() {
 function checkAutoFeedback() {
   try {
     if (STATE.pendingAutoFeedback || 
-        STATE.userHasGivenFeedback || 
-        STATE.aiActionBlocked ||
-        STATE.userIntentToStay ||
-        STATE.userOverrideActive) {
+        STATE.userHasGivenFeedback) {
       return;
     }
 
@@ -1414,9 +1261,8 @@ function checkAutoFeedback() {
     );
     
     if (isAlreadyLiked || isAlreadyDisliked) {
-      console.log('[ShortsAI] Video already has manual feedback, blocking AI');
+      console.log('[ShortsAI] Video already has manual feedback, skipping auto-feedback for this video');
       STATE.userHasGivenFeedback = true;
-      STATE.aiActionBlocked = true;
       return;
     }
 
