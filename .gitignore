@@ -1,0 +1,7 @@
+training/
+DataForTraining*.json
+UserModel.pt
+UserModel_before_merge.pt
+__pycache__/
+*.pyc
+shorts_ai_data.json
