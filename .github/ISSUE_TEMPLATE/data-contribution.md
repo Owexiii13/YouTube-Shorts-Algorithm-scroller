@@ -5,5 +5,5 @@ labels: Data
 ---
 
 ### Data Upload
-Please drag and drop your `DataForTrainingX.json` files below. (X could be any number, it depends on how many files it generated.)
+Please drag and drop your `Model.json` file below.
 *(Found in the folder of the YouTube-Shorts-Algorithm-scroller).*
